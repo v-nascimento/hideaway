@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "target": "ES2021",
+    "lib": ["DOM", "ES2021"],
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noImplicitAny": true,
+    "isolatedModules": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "prototype/**/*.ts"]
+}
