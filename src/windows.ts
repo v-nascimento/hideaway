@@ -368,6 +368,14 @@ export class WindowManager {
 
 	// ---------- unload (PLAN §8) ----------
 
+	/** Turns one named window back into an ordinary pop-out (window removed in settings). */
+	release(cfgId: string) {
+		const lw = this.live.get(cfgId);
+		if (!lw) return;
+		this.detach(lw);
+		if (!lw.win.isDestroyed()) this.native.release(lw.win, this.normalRect(lw.cfg), true);
+	}
+
 	/** Turns every named window back into an ordinary pop-out. */
 	releaseAll() {
 		for (const lw of [...this.live.values()]) {
