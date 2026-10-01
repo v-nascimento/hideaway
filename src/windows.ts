@@ -1,7 +1,8 @@
 import { debounce, Notice, TFile, WorkspaceLeaf, WorkspaceWindow } from "obsidian";
 import type HideawayPlugin from "./main";
-import type { Mode, WindowConfig, WindowState } from "./data";
+import { DEFAULT_QUAKE, Edge, Mode, WindowConfig, WindowState } from "./data";
 import type { Native, NativeWindow, Rect } from "./electron";
+import { depthPct, move, quakeRect, slide } from "./quake";
 
 const DEFAULT_SIZE = { width: 900, height: 650 };
 
@@ -17,7 +18,19 @@ interface LiveWindow {
 	wantVisible: boolean;
 	/** Set once the window starts closing; its layout must not be touched after that. */
 	closing: boolean;
+	/** While shown in Quake mode: where, and which edge group it belongs to. */
+	quake?: QuakePlace;
+	/** True while Hideaway itself moves the window, so it isn't taken for a user resize. */
+	animating: boolean;
 	cleanups: (() => void)[];
+}
+
+interface QuakePlace {
+	area: Rect;
+	edge: Edge;
+	/** Edge group key: same monitor and edge. */
+	group: string;
+	rect: Rect;
 }
 
 /** Compact description of a layout tree, for the debug log. */
@@ -33,6 +46,8 @@ export class WindowManager {
 	private live = new Map<string, LiveWindow>();
 	private busy = new Set<string>();
 	private quitting = false;
+	/** Quake windows shown on the same monitor edge, in opening order (PLAN: sharing an edge). */
+	private edgeGroups = new Map<string, LiveWindow[]>();
 
 	constructor(private plugin: HideawayPlugin, private native: Native) {
 		// When Obsidian quits, don't bring hidden windows back on the way out.
@@ -168,7 +183,7 @@ export class WindowManager {
 	}
 
 	private attach(cfg: WindowConfig, win: NativeWindow, ww: WorkspaceWindow): LiveWindow {
-		const lw: LiveWindow = { cfg, win, ww, mode: "normal", wantVisible: false, closing: false, cleanups: [] };
+		const lw: LiveWindow = { cfg, win, ww, mode: "normal", wantVisible: false, closing: false, animating: false, cleanups: [] };
 		this.live.set(cfg.id, lw);
 		this.state(cfg).popoutId = (ww as any).id;
 		this.plugin.requestSave();
@@ -185,6 +200,20 @@ export class WindowManager {
 		lw.cleanups.push(this.native.listen(win, "closed", () => {
 			this.plugin.log(`${cfg.name}: closed`);
 			this.detach(lw);
+			// Windows that shared its edge fill the space again.
+			void this.leaveEdgeGroup(lw, true);
+		}));
+
+		// Dragging a Quake window's inner edge saves its new depth (PLAN §5).
+		lw.cleanups.push(this.native.listen(win, "resized", () => {
+			const q = lw.quake;
+			if (!q || lw.animating || !lw.wantVisible) return;
+			cfg.quake.depth = depthPct(win.getBounds(), q.area, q.edge);
+			this.plugin.requestSave();
+			// Snap it back flush with its edge and slot, at the new depth.
+			q.rect = this.slotRects(this.edgeGroups.get(q.group) ?? [lw]).get(lw) ?? q.rect;
+			win.setBounds(q.rect);
+			this.plugin.log(`${cfg.name}: depth dragged to ${cfg.quake.depth}%`);
 		}));
 
 		// Cursor moves don't change the layout, so watch the selection instead.
@@ -326,13 +355,16 @@ export class WindowManager {
 	}
 
 	private async show(lw: LiveWindow, mode: Mode) {
-		if (mode !== "normal") throw new Error("Quake Mode isn't built yet.");
 		lw.wantVisible = true;
 		lw.mode = mode;
 		this.native.unminimize(lw.win);
-		this.native.setQuakeStyle(lw.win, false);
-		this.native.showAt(lw.win, this.normalRect(lw.cfg));
-		this.focus(lw);
+		if (mode === "normal") {
+			this.native.setQuakeStyle(lw.win, false);
+			this.native.showAt(lw.win, this.normalRect(lw.cfg));
+			this.focus(lw);
+		} else {
+			await this.showQuake(lw, mode);
+		}
 	}
 
 	/** Brings the window forward and focuses its last active tab, cursor where it was left. */
@@ -348,7 +380,8 @@ export class WindowManager {
 		this.saveCursors(lw);
 		this.rememberNormalRect(lw);
 		lw.wantVisible = false;
-		this.native.hide(lw.win, !switching);
+		if (lw.quake) await this.hideQuake(lw, switching);
+		else this.native.hide(lw.win, !switching);
 		if (switching) return;
 		this.native.park(lw.win);
 		// Moving a window isn't a layout change, so ask Obsidian to save the parked
@@ -356,13 +389,112 @@ export class WindowManager {
 		this.app.workspace.requestSaveLayout();
 	}
 
-	/** "Reset position and size": forget the saved position and recentre a visible window. */
+	/**
+	 * "Reset position and size": forget the Normal position and go back to the
+	 * default Quake depth and span; a visible window moves there now.
+	 */
 	reset(cfg: WindowConfig) {
 		this.state(cfg).normalRect = undefined;
+		cfg.quake.depth = DEFAULT_QUAKE.depth;
+		cfg.quake.span = DEFAULT_QUAKE.span;
 		this.plugin.requestSave();
 		const lw = this.live.get(cfg.id);
-		if (lw && lw.wantVisible && lw.mode === "normal") {
+		if (!lw || !lw.wantVisible) return;
+		if (lw.quake) {
+			const members = this.edgeGroups.get(lw.quake.group) ?? [lw];
+			void Promise.all(this.moveMembers(members, this.slotRects(members)));
+		} else {
 			this.native.showAt(lw.win, this.normalRect(cfg));
+		}
+	}
+
+	// ---------- Quake mode (PLAN §5) ----------
+
+	/** Slides a window in from `edge` on the monitor under the mouse, sharing the edge with windows already there. */
+	private async showQuake(lw: LiveWindow, edge: Edge) {
+		await this.leaveEdgeGroup(lw, true); // in case Tray hid it while shown
+		const area = this.native.cursorWorkArea();
+		const group = `${area.x},${area.y},${area.width},${area.height}:${edge}`;
+		const members = [...(this.edgeGroups.get(group) ?? []), lw];
+		this.edgeGroups.set(group, members);
+		const rects = this.slotRects(members, area, edge);
+		lw.quake = { area, edge, group, rect: rects.get(lw)! };
+		this.native.setQuakeStyle(lw.win, true);
+		await Promise.all([
+			this.animated(lw, () =>
+				slide("in", lw.quake!.rect, {
+					win: lw.win,
+					clock: lw.ww.win,
+					area,
+					edge,
+					durationMs: lw.cfg.quake.durationMs,
+					onShown: () => this.focus(lw),
+				}),
+			),
+			...this.moveMembers(members.filter((m) => m !== lw), rects),
+		]);
+	}
+
+	private async hideQuake(lw: LiveWindow, switching: boolean) {
+		const q = lw.quake!;
+		const from = lw.win.getBounds();
+		await Promise.all([
+			this.animated(lw, () =>
+				slide("out", from, {
+					win: lw.win,
+					clock: lw.ww.win,
+					area: q.area,
+					edge: q.edge,
+					durationMs: lw.cfg.quake.durationMs,
+					onGone: () => this.native.hide(lw.win, !switching),
+				}),
+			),
+			this.leaveEdgeGroup(lw, true),
+		]);
+	}
+
+	/**
+	 * Each member's place on the shared edge, in opening order. The span is the
+	 * widest of the members' spans; each keeps its own depth.
+	 */
+	private slotRects(members: LiveWindow[], area?: Rect, edge?: Edge): Map<LiveWindow, Rect> {
+		const rects = new Map<LiveWindow, Rect>();
+		const span = Math.max(...members.map((m) => m.cfg.quake.span));
+		members.forEach((m, index) => {
+			const a = area ?? m.quake!.area;
+			const e = edge ?? m.quake!.edge;
+			rects.set(m, quakeRect(a, e, m.cfg.quake.depth, span, { index, count: members.length }));
+		});
+		return rects;
+	}
+
+	/** Animates shown Quake windows to their (new) places. */
+	private moveMembers(members: LiveWindow[], rects: Map<LiveWindow, Rect>): Promise<void>[] {
+		return members.map((m) => {
+			const rect = rects.get(m);
+			if (!m.quake || !rect) return Promise.resolve();
+			m.quake.rect = rect;
+			return this.animated(m, () => move(m.win, rect, m.ww.win, m.cfg.quake.durationMs));
+		});
+	}
+
+	/** Takes a window out of its edge group; with `fill`, the rest slide over to fill the space. */
+	private async leaveEdgeGroup(lw: LiveWindow, fill: boolean) {
+		const q = lw.quake;
+		lw.quake = undefined;
+		if (!q) return;
+		const rest = (this.edgeGroups.get(q.group) ?? []).filter((m) => m !== lw);
+		if (rest.length > 0) this.edgeGroups.set(q.group, rest);
+		else this.edgeGroups.delete(q.group);
+		if (fill && rest.length > 0) await Promise.all(this.moveMembers(rest, this.slotRects(rest)));
+	}
+
+	private async animated(lw: LiveWindow, run: () => Promise<void>) {
+		lw.animating = true;
+		try {
+			await run();
+		} finally {
+			lw.animating = false;
 		}
 	}
 
@@ -373,13 +505,16 @@ export class WindowManager {
 		const lw = this.live.get(cfgId);
 		if (!lw) return;
 		this.detach(lw);
+		void this.leaveEdgeGroup(lw, true);
 		if (!lw.win.isDestroyed()) this.native.release(lw.win, this.normalRect(lw.cfg), true);
 	}
 
 	/** Turns every named window back into an ordinary pop-out. */
 	releaseAll() {
+		this.edgeGroups.clear();
 		for (const lw of [...this.live.values()]) {
 			this.detach(lw);
+			lw.quake = undefined;
 			try {
 				if (lw.win.isDestroyed()) continue;
 				this.native.release(lw.win, this.normalRect(lw.cfg), !this.quitting);

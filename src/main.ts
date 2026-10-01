@@ -1,5 +1,5 @@
 import { debounce, Notice, Plugin } from "obsidian";
-import { DEFAULT_QUAKE, defaultData, HideawayData, modeName, WindowConfig } from "./data";
+import { DEFAULT_QUAKE, defaultData, Edge, HideawayData, modeName, WindowConfig } from "./data";
 import { Native } from "./electron";
 import { HOTKEY_PROBLEMS, HotkeyStatus } from "./hotkeys";
 import { HideawaySettingTab } from "./settings";
@@ -8,6 +8,8 @@ import { WindowManager } from "./windows";
 // Writes debug.log in the plugin's folder while Hideaway is in development.
 // Turn off before the first release.
 const DEBUG_LOG = true;
+
+const EDGES: Edge[] = ["N", "S", "E", "W"];
 
 export default class HideawayPlugin extends Plugin {
 	data: HideawayData = defaultData();
@@ -97,6 +99,9 @@ export default class HideawayPlugin extends Plugin {
 		for (const cfg of this.data.windows) {
 			const name = cfg.name.trim() || "Untitled";
 			this.addWindowCommand(`toggle-${cfg.id}`, `Toggle ${name}`, () => void this.windows?.toggle(cfg, "normal"));
+			for (const edge of EDGES) {
+				this.addWindowCommand(`quake-${edge.toLowerCase()}-${cfg.id}`, `${name}: ${modeName(edge)}`, () => void this.windows?.toggle(cfg, edge));
+			}
 			this.addWindowCommand(`reset-${cfg.id}`, `Reset ${name} position and size`, () => this.windows?.reset(cfg));
 		}
 	}
