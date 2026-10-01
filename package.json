@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "proto": "node esbuild.config.mjs --proto",
     "deploy": "node scripts/deploy.mjs"
   },
   "devDependencies": {
