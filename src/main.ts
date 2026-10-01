@@ -5,9 +5,8 @@ import { HOTKEY_PROBLEMS, HotkeyStatus } from "./hotkeys";
 import { HideawaySettingTab } from "./settings";
 import { WindowManager } from "./windows";
 
-// Writes debug.log in the plugin's folder while Hideaway is in development.
-// Turn off before the first release.
-const DEBUG_LOG = true;
+// Writes debug.log in the plugin's folder. For development only; keep off in releases.
+const DEBUG_LOG = false;
 
 const EDGES: Edge[] = ["N", "S", "E", "W"];
 
