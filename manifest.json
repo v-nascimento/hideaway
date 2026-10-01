@@ -1,6 +1,6 @@
 {
-  "id": "quake-console",
-  "name": "Quake Console",
+  "id": "hideaway",
+  "name": "Hideaway",
   "version": "0.0.1",
   "minAppVersion": "1.13.0",
   "description": "Give pop-out windows their own system-wide hotkey, with an optional Quake-style slide-in mode.",

@@ -2,7 +2,7 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-const target = "A:/TestVault/.obsidian/plugins/quake-console";
+const target = "A:/TestVault/.obsidian/plugins/hideaway";
 
 mkdirSync(target, { recursive: true });
 for (const file of ["main.js", "manifest.json", "styles.css"]) {

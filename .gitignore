@@ -3,3 +3,5 @@ main.js
 data.json
 release/
 *.log
+.claude/settings.local.json
+.env
