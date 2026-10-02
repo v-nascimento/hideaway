@@ -1,12 +1,12 @@
 import type { Rect } from "./electron";
 
 export type Edge = "N" | "S" | "E" | "W";
-export type Mode = "normal" | Edge;
+export type Mode = "normal" | "quake";
 
 export const EDGE_NAMES: Record<Edge, string> = { N: "top", S: "bottom", E: "right", W: "left" };
 
 export function modeName(mode: Mode): string {
-	return mode === "normal" ? "Normal" : `Quake Mode ${mode} (${EDGE_NAMES[mode]})`;
+	return mode === "normal" ? "Normal" : "Quake";
 }
 
 export interface HotkeyBinding {
@@ -16,11 +16,24 @@ export interface HotkeyBinding {
 }
 
 export interface QuakeConfig {
-	/** How far the window reaches in from the edge, in % of the monitor. */
+	/** The edge the window first opens on; after that, the last edge used. */
+	edge: Edge;
+	/** Default depth on the top and bottom edges: how far the window reaches in, in % of the monitor's height. */
 	depth: number;
-	/** How much of the edge it covers, in %. */
+	/** Default span on the top and bottom edges: how much of the width it covers, in %. */
 	span: number;
+	/** The same two defaults for the left and right edges: % of the monitor's width, and of its height. */
+	sideDepth: number;
+	sideSpan: number;
 	durationMs: number;
+}
+
+/** Where a Quake window sits on one edge, in % of the monitor's usable area. */
+export interface QuakePlacement {
+	depth: number;
+	span: number;
+	/** The middle of the window along the edge: 50 is centred. */
+	centre: number;
 }
 
 /** A named window as set up in settings. */
@@ -45,20 +58,63 @@ export interface WindowState {
 	activeLeafId?: string;
 	/** Normal-mode position; Obsidian's layout only knows the last position. */
 	normalRect?: Rect;
+	/** The edge a Quake window was last on. */
+	quakeEdge?: Edge;
+	/** Size and position the user chose, per edge. Edges without an entry use the defaults. */
+	quakePlacement?: Partial<Record<Edge, QuakePlacement>>;
 }
 
 export interface HideawayData {
-	version: 1;
+	version: 2;
 	windows: WindowConfig[];
 	/** Keyed by WindowConfig.id. */
 	state: Record<string, WindowState>;
 }
 
-export const DEFAULT_QUAKE: QuakeConfig = { depth: 40, span: 100, durationMs: 150 };
+export const DEFAULT_QUAKE: QuakeConfig = { edge: "N", depth: 40, span: 100, sideDepth: 40, sideSpan: 100, durationMs: 150 };
+
+/** The placement a window gets on an edge where the user hasn't chosen one. */
+export function defaultPlacement(q: QuakeConfig, edge: Edge): QuakePlacement {
+	const sides = edge === "E" || edge === "W";
+	return { depth: sides ? q.sideDepth : q.depth, span: sides ? q.sideSpan : q.span, centre: 50 };
+}
+
+const EDGES: Edge[] = ["N", "S", "E", "W"];
+
+/**
+ * Turns saved data into the current shape, or returns null when it can't be
+ * used (no version, e.g. the prototype's). Version 1 had one hotkey mode per
+ * edge; those become Quake hotkeys, and the first one's edge the starting edge.
+ */
+export function migrate(saved: unknown): HideawayData | null {
+	const data = saved as { version?: number; windows?: any[]; state?: Record<string, WindowState> } | null;
+	if (!data || (data.version !== 1 && data.version !== 2) || !Array.isArray(data.windows)) return null;
+	const windows = data.windows.map((w): WindowConfig => {
+		const oldModes: string[] = (w.hotkeys ?? []).map((h: { mode: string }) => h.mode);
+		const hotkeys: HotkeyBinding[] = (w.hotkeys ?? []).map((h: { accelerator: string; mode: string }) => ({
+			accelerator: h.accelerator,
+			mode: h.mode === "normal" ? "normal" : "quake",
+		}));
+		const firstEdge = oldModes.find((m) => EDGES.includes(m as Edge)) as Edge | undefined;
+		return {
+			...w,
+			hotkeys,
+			quake: {
+				...DEFAULT_QUAKE,
+				...w.quake,
+				edge: w.quake?.edge ?? firstEdge ?? DEFAULT_QUAKE.edge,
+				// Data from before the side defaults existed: they start the same as the top/bottom ones.
+				sideDepth: w.quake?.sideDepth ?? w.quake?.depth ?? DEFAULT_QUAKE.sideDepth,
+				sideSpan: w.quake?.sideSpan ?? w.quake?.span ?? DEFAULT_QUAKE.sideSpan,
+			},
+		};
+	});
+	return { version: 2, windows, state: data.state ?? {} };
+}
 
 export function defaultData(): HideawayData {
 	return {
-		version: 1,
+		version: 2,
 		windows: [
 			{
 				id: "scratch",

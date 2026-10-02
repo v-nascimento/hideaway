@@ -1,10 +1,19 @@
 import { debounce, Notice, TFile, WorkspaceLeaf, WorkspaceWindow } from "obsidian";
 import type HideawayPlugin from "./main";
-import { DEFAULT_QUAKE, Edge, Mode, WindowConfig, WindowState } from "./data";
-import type { Native, NativeWindow, Rect } from "./electron";
-import { depthPct, move, quakeRect, slide } from "./quake";
+import { defaultPlacement, Edge, Mode, QuakePlacement, WindowConfig, WindowState } from "./data";
+import type { Native, NativeEvent, NativeInput, NativeWindow, Rect } from "./electron";
+import { alongAxis, edgeAtPoint, isDefaultPlacement, move, neighbourArea, OPPOSITE, overlapAlong, placementFromRect, quakeRect, resizeRect, slide } from "./quake";
+import { QuakeButton } from "./quakeButton";
+import { QuakeFrame } from "./quakeDrag";
 
 const DEFAULT_SIZE = { width: 900, height: 650 };
+
+/** Win+arrow, as seen in the focused window, and the edge each one asks for. */
+const WIN_ARROW_EDGE: Record<string, Edge> = { ArrowUp: "N", ArrowDown: "S", ArrowLeft: "W", ArrowRight: "E" };
+/** The side of a window that is flush with the screen, as Electron names it in `will-resize`. */
+const FLUSH_SIDE: Record<Edge, string> = { N: "top", S: "bottom", W: "left", E: "right" };
+
+const sameRect = (a: Rect, b: Rect) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -20,8 +29,12 @@ interface LiveWindow {
 	closing: boolean;
 	/** While shown in Quake mode: where, and which edge group it belongs to. */
 	quake?: QuakePlace;
-	/** True while Hideaway itself moves the window, so it isn't taken for a user resize. */
-	animating: boolean;
+	/** Above 0 while Hideaway itself moves the window, so it isn't taken for a user move or resize. */
+	animating: number;
+	/** The reset button in the tab bar (Quake mode only). */
+	button: QuakeButton;
+	/** Moves and resizes the window from the page in Quake mode. */
+	frame: QuakeFrame;
 	cleanups: (() => void)[];
 }
 
@@ -183,7 +196,27 @@ export class WindowManager {
 	}
 
 	private attach(cfg: WindowConfig, win: NativeWindow, ww: WorkspaceWindow): LiveWindow {
-		const lw: LiveWindow = { cfg, win, ww, mode: "normal", wantVisible: false, closing: false, animating: false, cleanups: [] };
+		const lw: LiveWindow = {
+			cfg,
+			win,
+			ww,
+			mode: "normal",
+			wantVisible: false,
+			closing: false,
+			animating: 0,
+			button: new QuakeButton(ww.doc, () => void this.reset(cfg)),
+			frame: new QuakeFrame(ww.doc, {
+				start: () => (this.userControlled(lw) ? win.getBounds() : null),
+				move: (x, y) => this.dragTo(lw, x, y),
+				resize: (from, sides, dx, dy) => this.resizeTo(lw, from, sides, dx, dy),
+				drop: (kind) => (kind === "move" ? this.onMoved(lw) : this.onResized(lw)),
+			}),
+			cleanups: [],
+		};
+		lw.cleanups.push(() => {
+			lw.button.remove();
+			lw.frame.disable();
+		});
 		this.live.set(cfg.id, lw);
 		this.state(cfg).popoutId = (ww as any).id;
 		this.plugin.requestSave();
@@ -204,17 +237,7 @@ export class WindowManager {
 			void this.leaveEdgeGroup(lw, true);
 		}));
 
-		// Dragging a Quake window's inner edge saves its new depth (PLAN §5).
-		lw.cleanups.push(this.native.listen(win, "resized", () => {
-			const q = lw.quake;
-			if (!q || lw.animating || !lw.wantVisible) return;
-			cfg.quake.depth = depthPct(win.getBounds(), q.area, q.edge);
-			this.plugin.requestSave();
-			// Snap it back flush with its edge and slot, at the new depth.
-			q.rect = this.slotRects(this.edgeGroups.get(q.group) ?? [lw]).get(lw) ?? q.rect;
-			win.setBounds(q.rect);
-			this.plugin.log(`${cfg.name}: depth dragged to ${cfg.quake.depth}%`);
-		}));
+		this.watchUserMoves(lw);
 
 		// Cursor moves don't change the layout, so watch the selection instead.
 		const cursorsSoon = debounce(() => this.saveCursors(lw), 500, true);
@@ -231,6 +254,210 @@ export class WindowManager {
 		lw.cleanups.push(() => ww.win.removeEventListener("beforeunload", onBeforeUnload));
 
 		return lw;
+	}
+
+	// ---------- the user moving and resizing a Quake window (PLAN: Quake changes) ----------
+
+	/** True while the user can be moving or resizing this window: shown in Quake mode and not being moved by Hideaway. */
+	private userControlled(lw: LiveWindow): boolean {
+		return !!lw.quake && lw.wantVisible && !lw.animating && !lw.closing && !this.busy.has(lw.cfg.id);
+	}
+
+	/**
+	 * True while the window's edge is split equally: other windows are on it and, at their own
+	 * sizes and places, they would overlap. Otherwise each window keeps its own place.
+	 */
+	private sharing(lw: LiveWindow): boolean {
+		const q = lw.quake;
+		const members = this.edgeGroups.get(q?.group ?? "") ?? [];
+		if (!q || members.length < 2) return false;
+		return overlapAlong([...this.ownRects(members, q.area, q.edge).values()], q.edge);
+	}
+
+	/**
+	 * The first move or resize on an equally split edge keeps the split as it is: every
+	 * window's current size and place become its own, so they no longer overlap and can be adjusted.
+	 */
+	private freezeSplit(lw: LiveWindow) {
+		const q = lw.quake!;
+		for (const m of this.edgeGroups.get(q.group) ?? []) {
+			if (m.quake && this.alive(m)) this.savePlacement(m, q.edge, placementFromRect(m.quake.rect, q.area, q.edge));
+		}
+	}
+
+	/** The stretch of the edge a window can move or grow into: bounded by its neighbours, or the whole monitor. */
+	private lane(lw: LiveWindow): Rect {
+		const q = lw.quake!;
+		const horiz = q.edge === "N" || q.edge === "S";
+		const own = horiz ? [q.rect.x, q.rect.x + q.rect.width] : [q.rect.y, q.rect.y + q.rect.height];
+		let lo = horiz ? q.area.x : q.area.y;
+		let hi = horiz ? q.area.x + q.area.width : q.area.y + q.area.height;
+		for (const m of this.edgeGroups.get(q.group) ?? []) {
+			if (m === lw || !m.quake) continue;
+			const r = m.quake.rect;
+			const [from, to] = horiz ? [r.x, r.x + r.width] : [r.y, r.y + r.height];
+			if (to <= own[0]) lo = Math.max(lo, to);
+			else if (from >= own[1]) hi = Math.min(hi, from);
+		}
+		return horiz ? { ...q.area, x: lo, width: hi - lo } : { ...q.area, y: lo, height: hi - lo };
+	}
+
+	private watchUserMoves(lw: LiveWindow) {
+		const { win } = lw;
+		const listen = (event: string, fn: (...args: any[]) => void) => lw.cleanups.push(this.native.listen(win, event, fn));
+
+		// Fallback if the system resizes anyway: the edge flush against the screen can't be dragged.
+		listen("will-resize", (event: NativeEvent, _next: Rect, details: { edge: string }) => {
+			const q = lw.quake;
+			if (q && this.userControlled(lw) && details.edge.includes(FLUSH_SIDE[q.edge])) event.preventDefault();
+		});
+		listen("moved", () => this.onMoved(lw));
+		listen("resized", () => this.onResized(lw));
+		// Dragging to the top of the screen, or Win+Up, maximizes the window: take it as "move to the top".
+		listen("maximize", () => this.onMaximize(lw));
+		// Win+Down minimizes the window: take it as "move to the bottom". The key press itself never reaches us
+		// (and the Win key's own press isn't reliable), so any minimize counts; hiding is the hotkey's job.
+		listen("minimize", () => this.onMinimize(lw));
+		lw.cleanups.push(this.native.listenInput(win, (input) => this.onKey(lw, input)));
+	}
+
+	/** After a drag: dropped with the pointer at a screen edge changes edge; otherwise the new position along the edge is saved. */
+	private onMoved(lw: LiveWindow) {
+		const q = lw.quake;
+		if (!q || !this.userControlled(lw)) return;
+		const cursor = this.native.cursorPoint();
+		const area = this.native.workAreaAt(cursor);
+		const edge = edgeAtPoint(cursor, area);
+		this.plugin.log(`${lw.cfg.name}: moved, pointer ${JSON.stringify(cursor)} edge=${edge ?? "none"} (on ${q.edge})`);
+		if (edge && (edge !== q.edge || !sameRect(area, q.area))) {
+			void this.exclusive(lw.cfg.id, () => this.relocate(lw, edge, area), lw);
+			return;
+		}
+		this.saveFromBounds(lw);
+	}
+
+	/** After a resize: the span stays centred where it was, whichever side was dragged. */
+	private onResized(lw: LiveWindow) {
+		if (lw.quake && this.userControlled(lw)) this.saveFromBounds(lw, true);
+	}
+
+	/** A title-bar drag: the window follows the pointer along its edge only; on a shared edge it stays put. */
+	private dragTo(lw: LiveWindow, x: number, y: number) {
+		const q = lw.quake;
+		if (!q || lw.win.isDestroyed()) return;
+		if (this.sharing(lw)) this.freezeSplit(lw);
+		lw.win.setBounds(alongAxis({ ...q.rect, x, y }, q.edge, this.lane(lw)));
+	}
+
+	/** A pointer resize in progress: depth on one side, span about the centre (within the free stretch). */
+	private resizeTo(lw: LiveWindow, from: Rect, sides: ("l" | "r" | "t" | "b")[], dx: number, dy: number) {
+		const q = lw.quake;
+		if (!q || lw.win.isDestroyed()) return;
+		if (this.sharing(lw)) this.freezeSplit(lw);
+		lw.win.setBounds(resizeRect(from, sides, dx, dy, q.edge, q.area, this.lane(lw)));
+	}
+
+	/** Saves the window's size and position for its edge, then snaps it flush and into its slot. */
+	private saveFromBounds(lw: LiveWindow, keepCentre = false) {
+		const q = lw.quake!;
+		const placement = placementFromRect(lw.win.getBounds(), q.area, q.edge);
+		if (keepCentre) placement.centre = this.placementOf(lw, q.edge).centre;
+		// While the edge is split equally only the depth is the window's own.
+		this.savePlacement(lw, q.edge, this.sharing(lw) ? { ...this.placementOf(lw, q.edge), depth: placement.depth } : placement);
+		const members = this.edgeGroups.get(q.group) ?? [lw];
+		const rects = this.slotRects(members);
+		q.rect = rects.get(lw) ?? q.rect;
+		lw.win.setBounds(q.rect);
+		// If this made the windows overlap, the others move into the equal split.
+		void Promise.all(this.moveMembers(members.filter((m) => m !== lw && m.quake && !sameRect(m.quake.rect, rects.get(m)!)), rects));
+		this.syncButton(lw);
+		this.plugin.log(`${lw.cfg.name}: placement on ${q.edge} saved: ${JSON.stringify(this.placementOf(lw, q.edge))}`);
+	}
+
+	private onMaximize(lw: LiveWindow) {
+		const q = lw.quake;
+		if (!q || !this.userControlled(lw)) return;
+		this.plugin.log(`${lw.cfg.name}: maximize taken as move to top`);
+		const cursor = this.native.cursorPoint();
+		const dropArea = this.native.workAreaAt(cursor);
+		const area = edgeAtPoint(cursor, dropArea) === "N" ? dropArea : q.area;
+		void this.exclusive(
+			lw.cfg.id,
+			async () => {
+				lw.win.unmaximize();
+				if (edgeAtPoint(cursor, dropArea) === "N") await this.relocate(lw, "N", area);
+				else await this.stepToward(lw, "N"); // Win+Up
+			},
+			lw,
+		);
+	}
+
+	private onMinimize(lw: LiveWindow) {
+		if (!lw.quake || !this.userControlled(lw)) return;
+		this.plugin.log(`${lw.cfg.name}: minimize taken as Win+Down`);
+		void this.exclusive(
+			lw.cfg.id,
+			async () => {
+				lw.win.restore();
+				await this.stepToward(lw, "S");
+			},
+			lw,
+		);
+	}
+
+	private onKey(lw: LiveWindow, input: NativeInput) {
+		const edge = input.meta && input.type === "keyUp" ? WIN_ARROW_EDGE[input.key] : undefined;
+		if (!edge || !lw.quake || !this.userControlled(lw)) return;
+		this.plugin.log(`${lw.cfg.name}: Win+${input.key} -> ${edge}`);
+		void this.exclusive(
+			lw.cfg.id,
+			() => this.stepToward(lw, edge),
+			lw,
+		);
+	}
+
+	/** Runs `fn` unless this window is busy; while it runs, the window's own moves aren't taken for the user's. */
+	private async exclusive(id: string, fn: () => Promise<void>, lw?: LiveWindow) {
+		if (this.busy.has(id)) return;
+		this.busy.add(id);
+		if (lw) lw.animating++;
+		try {
+			await fn();
+		} catch (e) {
+			this.plugin.log(`${id}: failed: ${e}`);
+		} finally {
+			if (lw) lw.animating--;
+			this.busy.delete(id);
+		}
+	}
+
+	/** False for a window whose native window is gone; such a window must not stay in an edge group. */
+	private alive(lw: LiveWindow): boolean {
+		try {
+			if (!lw.win.isDestroyed()) return true;
+		} catch {
+			// the window object itself is gone
+		}
+		this.plugin.log(`${lw.cfg.name}: dropped a destroyed window from its edge group`);
+		return false;
+	}
+
+	private placementOf(lw: LiveWindow, edge: Edge): QuakePlacement {
+		return this.state(lw.cfg).quakePlacement?.[edge] ?? defaultPlacement(lw.cfg.quake, edge);
+	}
+
+	private savePlacement(lw: LiveWindow, edge: Edge, placement: QuakePlacement) {
+		const st = this.state(lw.cfg);
+		(st.quakePlacement ??= {})[edge] = placement;
+		this.plugin.requestSave();
+	}
+
+	/** The reset button shows in Quake mode while the current edge's placement isn't the default. */
+	private syncButton(lw: LiveWindow) {
+		const q = lw.quake;
+		const custom = !!q && !isDefaultPlacement(this.state(lw.cfg).quakePlacement?.[q.edge], defaultPlacement(lw.cfg.quake, q.edge));
+		lw.button.sync(lw.mode === "quake" && lw.wantVisible && custom);
+		lw.frame.sync(lw.mode === "quake" && lw.wantVisible && q ? q.edge : null);
 	}
 
 	/**
@@ -288,6 +515,7 @@ export class WindowManager {
 	onLayoutChange() {
 		for (const lw of this.live.values()) {
 			if (lw.closing) continue; // closed with X: keep what we have
+			this.syncButton(lw); // tab changes and splits rebuild the tab bar
 			const node = this.layoutOf(lw.ww);
 			const leaves = this.leavesIn(lw.ww).length;
 			// Window gone or emptied: keep what we have (beforeTabClose handles the last tab).
@@ -325,6 +553,7 @@ export class WindowManager {
 
 	// ---------- toggle rules (PLAN §4) ----------
 
+	/** "Toggle" for Quake mode opens on the last edge used (or the starting edge the first time). */
 	async toggle(cfg: WindowConfig, mode: Mode) {
 		// Ignore presses while this window is opening or animating, so they can't pile up.
 		if (this.busy.has(cfg.id)) return;
@@ -354,16 +583,18 @@ export class WindowManager {
 		}
 	}
 
-	private async show(lw: LiveWindow, mode: Mode) {
+	private async show(lw: LiveWindow, mode: Mode, area?: Rect) {
 		lw.wantVisible = true;
 		lw.mode = mode;
 		this.native.unminimize(lw.win);
 		if (mode === "normal") {
+			lw.button.remove();
+			lw.frame.sync(null);
 			this.native.setQuakeStyle(lw.win, false);
 			this.native.showAt(lw.win, this.normalRect(lw.cfg));
 			this.focus(lw);
 		} else {
-			await this.showQuake(lw, mode);
+			await this.showQuake(lw, area);
 		}
 	}
 
@@ -390,35 +621,117 @@ export class WindowManager {
 	}
 
 	/**
-	 * "Reset position and size": forget the Normal position and go back to the
-	 * default Quake depth and span; a visible window moves there now.
+	 * "Reset position and size": back to the defaults on the current edge (a
+	 * window in Normal mode forgets its saved position); a shown window moves there now.
 	 */
-	reset(cfg: WindowConfig) {
-		this.state(cfg).normalRect = undefined;
-		cfg.quake.depth = DEFAULT_QUAKE.depth;
-		cfg.quake.span = DEFAULT_QUAKE.span;
-		this.plugin.requestSave();
+	async reset(cfg: WindowConfig) {
+		await this.exclusive(cfg.id, async () => {
+			const st = this.state(cfg);
+			const lw = this.live.get(cfg.id);
+			const edge = lw?.quake?.edge ?? st.quakeEdge ?? cfg.quake.edge;
+			if (st.quakePlacement) delete st.quakePlacement[edge];
+			if (!lw?.quake) st.normalRect = undefined;
+			this.plugin.requestSave();
+			if (!lw || !lw.wantVisible) return;
+			if (lw.quake) {
+				const members = this.edgeGroups.get(lw.quake.group) ?? [lw];
+				await Promise.all(this.moveMembers(members, this.slotRects(members)));
+				this.syncButton(lw);
+			} else {
+				this.native.showAt(lw.win, this.normalRect(cfg));
+			}
+		});
+	}
+
+	/** The "Reset Hideaway window" command: resets whichever Hideaway window is in front. */
+	resetFocused() {
+		const lw = [...this.live.values()].find((l) => l.wantVisible && (l.win.isFocused() || l.ww.doc === activeDocument));
+		if (lw) void this.reset(lw.cfg);
+		else new Notice("Hideaway: no Hideaway window is in front.");
+	}
+
+	/** After a default (depth, span) changed in settings: a shown window on an edge using the defaults follows. */
+	refresh(cfg: WindowConfig) {
 		const lw = this.live.get(cfg.id);
-		if (!lw || !lw.wantVisible) return;
-		if (lw.quake) {
-			const members = this.edgeGroups.get(lw.quake.group) ?? [lw];
-			void Promise.all(this.moveMembers(members, this.slotRects(members)));
-		} else {
-			this.native.showAt(lw.win, this.normalRect(cfg));
+		if (!lw?.quake || !lw.wantVisible || lw.animating || this.busy.has(cfg.id)) return;
+		const members = this.edgeGroups.get(lw.quake.group) ?? [lw];
+		void Promise.all(this.moveMembers(members, this.slotRects(members))).then(() => this.syncButton(lw));
+	}
+
+	/** "Move to top / bottom / left / right": a shown Quake window slides to that edge; otherwise it opens there. */
+	async moveTo(cfg: WindowConfig, edge: Edge) {
+		const lw = this.live.get(cfg.id);
+		if (lw?.quake && lw.wantVisible) {
+			await this.exclusive(cfg.id, () => this.stepToward(lw, edge), lw);
+			return;
 		}
+		this.state(cfg).quakeEdge = edge;
+		await this.toggle(cfg, "quake");
+	}
+
+	/**
+	 * Win+arrow and "Move to …": a window not yet on that edge goes to it; one already
+	 * there hops to the monitor beyond it (if any), arriving on that monitor's facing edge.
+	 */
+	private async stepToward(lw: LiveWindow, edge: Edge) {
+		const q = lw.quake!;
+		if (edge === q.edge) {
+			const next = neighbourArea(this.native.workAreas(), q.area, edge);
+			if (next) return this.slideToEdge(lw, OPPOSITE[edge], next);
+		}
+		return this.slideToEdge(lw, edge, q.area);
+	}
+
+	/** Slides a shown Quake window out and back in at an edge of a monitor. */
+	private async slideToEdge(lw: LiveWindow, edge: Edge, area: Rect) {
+		const q = lw.quake!;
+		if (edge === q.edge && sameRect(area, q.area)) {
+			this.focus(lw);
+			return;
+		}
+		this.plugin.log(`${lw.cfg.name}: slide to ${edge}`);
+		this.state(lw.cfg).quakeEdge = edge;
+		await this.hide(lw, true);
+		await this.show(lw, "quake", area);
+	}
+
+	/** Moves a shown Quake window to another edge or monitor straight from where it is (after a mouse drop). */
+	private async relocate(lw: LiveWindow, edge: Edge, area: Rect) {
+		this.plugin.log(`${lw.cfg.name}: relocate to ${edge}`);
+		await this.leaveEdgeGroup(lw, true);
+		const { members, rects } = this.enterEdgeGroup(lw, edge, area);
+		await Promise.all([
+			move(lw.win, lw.quake!.rect, lw.ww.win, lw.cfg.quake.durationMs),
+			...this.moveMembers(members.filter((m) => m !== lw), rects),
+		]);
+		lw.win.setBounds(lw.quake!.rect);
+		this.syncButton(lw);
+		this.focus(lw);
 	}
 
 	// ---------- Quake mode (PLAN §5) ----------
 
-	/** Slides a window in from `edge` on the monitor under the mouse, sharing the edge with windows already there. */
-	private async showQuake(lw: LiveWindow, edge: Edge) {
-		await this.leaveEdgeGroup(lw, true); // in case Tray hid it while shown
-		const area = this.native.cursorWorkArea();
+	/** Joins the windows sharing an edge of a monitor, in opening order, and works out everyone's place. */
+	private enterEdgeGroup(lw: LiveWindow, edge: Edge, area: Rect) {
 		const group = `${area.x},${area.y},${area.width},${area.height}:${edge}`;
-		const members = [...(this.edgeGroups.get(group) ?? []), lw];
+		const members = [...(this.edgeGroups.get(group) ?? []).filter((m) => this.alive(m)), lw];
 		this.edgeGroups.set(group, members);
 		const rects = this.slotRects(members, area, edge);
 		lw.quake = { area, edge, group, rect: rects.get(lw)! };
+		this.state(lw.cfg).quakeEdge = edge;
+		this.plugin.requestSave();
+		return { members, rects };
+	}
+
+	/**
+	 * Slides a window in from its edge (the last one used, or the starting edge) on
+	 * the monitor under the mouse, or on `monitor`, sharing the edge with windows already there.
+	 */
+	private async showQuake(lw: LiveWindow, monitor?: Rect) {
+		await this.leaveEdgeGroup(lw, true); // in case Tray hid it while shown
+		const edge = this.state(lw.cfg).quakeEdge ?? lw.cfg.quake.edge;
+		const area = monitor ?? this.native.cursorWorkArea();
+		const { members, rects } = this.enterEdgeGroup(lw, edge, area);
 		this.native.setQuakeStyle(lw.win, true);
 		await Promise.all([
 			this.animated(lw, () =>
@@ -433,6 +746,7 @@ export class WindowManager {
 			),
 			...this.moveMembers(members.filter((m) => m !== lw), rects),
 		]);
+		this.syncButton(lw);
 	}
 
 	private async hideQuake(lw: LiveWindow, switching: boolean) {
@@ -453,17 +767,31 @@ export class WindowManager {
 		]);
 	}
 
+	/** Each member at its own saved depth, span and position on the edge. */
+	private ownRects(members: LiveWindow[], area: Rect, edge: Edge): Map<LiveWindow, Rect> {
+		const rects = new Map<LiveWindow, Rect>();
+		for (const m of members) {
+			const p = this.placementOf(m, edge);
+			rects.set(m, quakeRect(area, edge, p.depth, p.span, { index: 0, count: 1 }, p.centre));
+		}
+		return rects;
+	}
+
 	/**
-	 * Each member's place on the shared edge, in opening order. The span is the
-	 * widest of the members' spans; each keeps its own depth.
+	 * Each member's place on the edge. Windows keep their own size and position as long as they
+	 * don't overlap. If they would, they split the widest of their spans equally, centred, in
+	 * opening order, each keeping its own depth; their own places come back once they don't overlap.
 	 */
 	private slotRects(members: LiveWindow[], area?: Rect, edge?: Edge): Map<LiveWindow, Rect> {
+		const ref = members.find((m) => m.quake)?.quake;
+		const a = area ?? ref!.area;
+		const e = edge ?? ref!.edge;
+		const own = this.ownRects(members, a, e);
+		if (!overlapAlong([...own.values()], e)) return own;
 		const rects = new Map<LiveWindow, Rect>();
-		const span = Math.max(...members.map((m) => m.cfg.quake.span));
+		const span = Math.max(...members.map((m) => this.placementOf(m, e).span));
 		members.forEach((m, index) => {
-			const a = area ?? m.quake!.area;
-			const e = edge ?? m.quake!.edge;
-			rects.set(m, quakeRect(a, e, m.cfg.quake.depth, span, { index, count: members.length }));
+			rects.set(m, quakeRect(a, e, this.placementOf(m, e).depth, span, { index, count: members.length }, 50));
 		});
 		return rects;
 	}
@@ -472,7 +800,7 @@ export class WindowManager {
 	private moveMembers(members: LiveWindow[], rects: Map<LiveWindow, Rect>): Promise<void>[] {
 		return members.map((m) => {
 			const rect = rects.get(m);
-			if (!m.quake || !rect) return Promise.resolve();
+			if (!m.quake || !rect || !this.alive(m)) return Promise.resolve();
 			m.quake.rect = rect;
 			return this.animated(m, () => move(m.win, rect, m.ww.win, m.cfg.quake.durationMs));
 		});
@@ -483,18 +811,18 @@ export class WindowManager {
 		const q = lw.quake;
 		lw.quake = undefined;
 		if (!q) return;
-		const rest = (this.edgeGroups.get(q.group) ?? []).filter((m) => m !== lw);
+		const rest = (this.edgeGroups.get(q.group) ?? []).filter((m) => m !== lw && this.alive(m));
 		if (rest.length > 0) this.edgeGroups.set(q.group, rest);
 		else this.edgeGroups.delete(q.group);
 		if (fill && rest.length > 0) await Promise.all(this.moveMembers(rest, this.slotRects(rest)));
 	}
 
 	private async animated(lw: LiveWindow, run: () => Promise<void>) {
-		lw.animating = true;
+		lw.animating++;
 		try {
 			await run();
 		} finally {
-			lw.animating = false;
+			lw.animating--;
 		}
 	}
 

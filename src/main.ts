@@ -1,7 +1,7 @@
 import { debounce, Notice, Plugin } from "obsidian";
-import { DEFAULT_QUAKE, defaultData, Edge, HideawayData, modeName, WindowConfig } from "./data";
+import { DEFAULT_QUAKE, defaultData, Edge, EDGE_NAMES, HideawayData, migrate, modeName, WindowConfig } from "./data";
 import { Native } from "./electron";
-import { HOTKEY_PROBLEMS, HotkeyStatus } from "./hotkeys";
+import { HOTKEY_PROBLEMS, HotkeyStatus, isWinArrow } from "./hotkeys";
 import { HideawaySettingTab } from "./settings";
 import { WindowManager } from "./windows";
 
@@ -37,6 +37,7 @@ export default class HideawayPlugin extends Plugin {
 		await this.loadSettings();
 		this.windows = new WindowManager(this, this.native);
 		this.addWindowCommands();
+		this.addCommand({ id: "reset-focused", name: "Reset Hideaway window", callback: () => this.windows?.resetFocused() });
 		this.registerHotkeys(true);
 		this.register(() => this.windows?.releaseAll());
 		this.addSettingTab(new HideawaySettingTab(this.app, this));
@@ -53,10 +54,11 @@ export default class HideawayPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const saved = (await this.loadData()) as Partial<HideawayData> | null;
-		// Anything without the current version (e.g. the prototype's data) is replaced.
-		if (saved?.version === 1 && Array.isArray(saved.windows)) {
-			this.data = { ...defaultData(), ...saved } as HideawayData;
+		// Version 1 data is migrated; anything without a version (e.g. the prototype's data) is replaced.
+		const migrated = migrate(await this.loadData());
+		if (migrated) {
+			this.data = migrated;
+			this.requestSave();
 		}
 	}
 
@@ -70,6 +72,16 @@ export default class HideawayPlugin extends Plugin {
 		this.registerHotkeys(false);
 		this.removeWindowCommands();
 		this.addWindowCommands();
+	}
+
+	/** Settings: a window's defaults changed, so a shown Quake window follows. */
+	refreshQuake(cfg: WindowConfig) {
+		this.windows?.refresh(cfg);
+	}
+
+	/** Settings: "Reset position and size". */
+	resetWindow(cfg: WindowConfig) {
+		void this.windows?.reset(cfg);
 	}
 
 	addWindow(): WindowConfig {
@@ -98,10 +110,11 @@ export default class HideawayPlugin extends Plugin {
 		for (const cfg of this.data.windows) {
 			const name = cfg.name.trim() || "Untitled";
 			this.addWindowCommand(`toggle-${cfg.id}`, `Toggle ${name}`, () => void this.windows?.toggle(cfg, "normal"));
+			this.addWindowCommand(`quake-${cfg.id}`, `${name}: Quake mode`, () => void this.windows?.toggle(cfg, "quake"));
 			for (const edge of EDGES) {
-				this.addWindowCommand(`quake-${edge.toLowerCase()}-${cfg.id}`, `${name}: ${modeName(edge)}`, () => void this.windows?.toggle(cfg, edge));
+				this.addWindowCommand(`move-${edge.toLowerCase()}-${cfg.id}`, `${name}: Move to ${EDGE_NAMES[edge]}`, () => void this.windows?.moveTo(cfg, edge));
 			}
-			this.addWindowCommand(`reset-${cfg.id}`, `Reset ${name} position and size`, () => this.windows?.reset(cfg));
+			this.addWindowCommand(`reset-${cfg.id}`, `Reset ${name} position and size`, () => this.resetWindow(cfg));
 		}
 	}
 
@@ -133,7 +146,9 @@ export default class HideawayPlugin extends Plugin {
 					continue;
 				}
 				let result: HotkeyStatus;
-				if (seen.has(key)) {
+				if (isWinArrow(key)) {
+					result = "reserved";
+				} else if (seen.has(key)) {
 					result = "duplicate";
 				} else {
 					seen.add(key);

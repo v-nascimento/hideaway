@@ -3,13 +3,20 @@
 import type { ShortcutResult } from "./electron";
 
 /** Result of registering one hotkey; "duplicate" = already used by another Hideaway hotkey. */
-export type HotkeyStatus = ShortcutResult | "duplicate";
+export type HotkeyStatus = ShortcutResult | "duplicate" | "reserved";
 
 export const HOTKEY_PROBLEMS: Record<Exclude<HotkeyStatus, "ok">, string> = {
 	taken: "is already used by another app",
 	invalid: "isn't a valid hotkey",
 	duplicate: "is already used by another Hideaway hotkey",
+	reserved: "uses Win+arrow, which is reserved for changing a Quake window's edge",
 };
+
+/** Win+arrow changes the edge of a focused Quake window, so it can't also be a hotkey. */
+export function isWinArrow(accelerator: string): boolean {
+	const parts = accelerator.split("+");
+	return parts.includes("Super") && ["Up", "Down", "Left", "Right"].includes(parts[parts.length - 1]);
+}
 
 /** Physical key (KeyboardEvent.code) -> accelerator key. Physical keys, so the
  *  recorded hotkey doesn't depend on the keyboard layout's characters. */
@@ -51,7 +58,9 @@ export function recordKey(e: KeyboardEvent): RecordResult {
 	if (mods.length === 0 && !/^F\d+$/.test(key)) {
 		return { kind: "rejected", reason: "Add Ctrl, Alt, Shift or Win (only F-keys work alone)." };
 	}
-	return { kind: "key", accelerator: [...mods, key].join("+") };
+	const accelerator = [...mods, key].join("+");
+	if (isWinArrow(accelerator)) return { kind: "rejected", reason: "Win+arrows change a Quake window's edge." };
+	return { kind: "key", accelerator };
 }
 
 /** "Control+Alt+F10" -> "Ctrl + Alt + F10" */

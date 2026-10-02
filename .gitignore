@@ -5,3 +5,4 @@ release/
 *.log
 .claude/settings.local.json
 .env
+QUAKE-CHANGES-PLAN.md

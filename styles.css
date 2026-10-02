@@ -1,1 +1,7 @@
 /* Hideaway styles */
+
+/* Reset button in a Quake window's tab bar; the tab bar is a window drag area. */
+.hideaway-reset {
+	flex: none;
+	-webkit-app-region: no-drag;
+}

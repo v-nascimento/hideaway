@@ -3,12 +3,26 @@
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
+/** An event whose default action (moving, resizing) a listener can cancel. */
+export interface NativeEvent {
+	preventDefault(): void;
+}
+
+/** A key event from `before-input-event`; only the parts Hideaway reads. */
+export interface NativeInput {
+	type: string;
+	key: string;
+	meta: boolean;
+}
+
 /** The parts of Electron's BrowserWindow that Hideaway uses. */
 export interface NativeWindow {
 	isDestroyed(): boolean;
 	isVisible(): boolean;
 	isFocused(): boolean;
 	isMinimized(): boolean;
+	isMaximized(): boolean;
+	unmaximize(): void;
 	getBounds(): Rect;
 	setBounds(rect: Rect): void;
 	getTitle(): string;
@@ -20,9 +34,15 @@ export interface NativeWindow {
 	setOpacity(opacity: number): void;
 	setAlwaysOnTop(flag: boolean): void;
 	setSkipTaskbar(skip: boolean): void;
+	setResizable(resizable: boolean): void;
+	setMinimizable(minimizable: boolean): void;
 	setShape(rects: Rect[]): void;
-	on(event: string, listener: () => void): void;
-	removeListener(event: string, listener: () => void): void;
+	on(event: string, listener: (...args: any[]) => void): void;
+	removeListener(event: string, listener: (...args: any[]) => void): void;
+	webContents: {
+		on(event: string, listener: (...args: any[]) => void): void;
+		removeListener(event: string, listener: (...args: any[]) => void): void;
+	};
 }
 
 interface Display {
@@ -98,11 +118,24 @@ export class Native {
 		return this.remote.getCurrentWindow();
 	}
 
-	listen(win: NativeWindow, event: string, listener: () => void): () => void {
+	listen(win: NativeWindow, event: string, listener: (...args: any[]) => void): () => void {
 		win.on(event, listener);
 		return () => {
 			try {
 				win.removeListener(event, listener);
+			} catch {
+				// window already destroyed
+			}
+		};
+	}
+
+	/** Listens to key presses in a window before the page and Windows see them. Returns the way to stop. */
+	listenInput(win: NativeWindow, listener: (input: NativeInput) => void): () => void {
+		const wrapped = (_event: unknown, input: NativeInput) => listener(input);
+		win.webContents.on("before-input-event", wrapped);
+		return () => {
+			try {
+				win.webContents.removeListener("before-input-event", wrapped);
 			} catch {
 				// window already destroyed
 			}
@@ -116,7 +149,10 @@ export class Native {
 	 */
 	hide(win: NativeWindow, returnFocus: boolean) {
 		win.setOpacity(0);
-		if (returnFocus) win.minimize();
+		if (returnFocus) {
+			win.setMinimizable(true); // a Quake window can't be minimized otherwise
+			win.minimize();
+		}
 		win.hide();
 	}
 
@@ -139,10 +175,16 @@ export class Native {
 		win.hide();
 	}
 
-	/** Always on top and out of the taskbar and Alt+Tab (Quake), or neither (Normal). */
+	/**
+	 * Always on top and out of the taskbar and Alt+Tab (Quake), or neither (Normal).
+	 * A Quake window isn't resizable or minimizable by the system: Hideaway resizes it from the
+	 * page, and Win+Down then reaches it as an ordinary key press instead of minimizing it.
+	 */
 	setQuakeStyle(win: NativeWindow, quake: boolean) {
 		win.setAlwaysOnTop(quake);
 		win.setSkipTaskbar(quake);
+		win.setResizable(!quake);
+		win.setMinimizable(!quake);
 	}
 
 	/** Shows a window fully, at the given position. */
@@ -163,9 +205,22 @@ export class Native {
 		if (show) win.show();
 	}
 
+	cursorPoint(): { x: number; y: number } {
+		return this.remote.screen.getCursorScreenPoint();
+	}
+
+	/** The usable area (without the taskbar) of the monitor nearest a point. */
+	workAreaAt(point: { x: number; y: number }): Rect {
+		return this.remote.screen.getDisplayNearestPoint(point).workArea;
+	}
+
+	/** The usable area of every monitor. */
+	workAreas(): Rect[] {
+		return this.remote.screen.getAllDisplays().map((d) => d.workArea);
+	}
+
 	cursorWorkArea(): Rect {
-		const s = this.remote.screen;
-		return s.getDisplayNearestPoint(s.getCursorScreenPoint()).workArea;
+		return this.workAreaAt(this.cursorPoint());
 	}
 
 	/** True when at least part of the rect is on some monitor. */

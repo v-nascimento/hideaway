@@ -1,9 +1,10 @@
 import { AbstractInputSuggest, App, ButtonComponent, Modal, PluginSettingTab, Scope, Setting, TFile } from "obsidian";
-import { HotkeyBinding, Mode, modeName, WindowConfig } from "./data";
+import { Edge, EDGE_NAMES, HotkeyBinding, Mode, modeName, WindowConfig } from "./data";
 import { formatAccelerator, HOTKEY_PROBLEMS, HotkeyStatus, isAltGrRisk, recordKey } from "./hotkeys";
 import type HideawayPlugin from "./main";
 
-const MODES: Mode[] = ["normal", "N", "S", "E", "W"];
+const MODES: Mode[] = ["normal", "quake"];
+const EDGES: Edge[] = ["N", "S", "E", "W"];
 
 export class HideawaySettingTab extends PluginSettingTab {
 	/** Stops the key recorder, if one is running. */
@@ -89,32 +90,28 @@ export class HideawaySettingTab extends PluginSettingTab {
 
 		const q = cfg.quake;
 		new Setting(el)
-			.setName("Quake depth")
-			.setDesc("How far a Quake window reaches in from the edge, in % of the screen.")
-			.addSlider((s) =>
-				s.setLimits(10, 100, 5).setValue(q.depth).setDynamicTooltip().onChange((v) => {
-					q.depth = v;
+			.setName("Starting edge")
+			.setDesc("Where Quake mode opens the first time. After that it opens on the edge it was last on.")
+			.addDropdown((d) => {
+				for (const edge of EDGES) d.addOption(edge, EDGE_NAMES[edge]);
+				d.setValue(q.edge).onChange((value) => {
+					q.edge = value as Edge;
 					this.plugin.requestSave();
-				}),
-			);
+				});
+			});
+		this.addNumbers(el, "Quake depth", "The default: how far a Quake window reaches in from its edge, in % of the screen (10 to 100). Top/bottom is a share of the height, left/right of the width.", 10, 100, [
+			{ label: "Top/bottom", value: q.depth, set: (v) => (q.depth = v) },
+			{ label: "Left/right", value: q.sideDepth, set: (v) => (q.sideDepth = v) },
+		], cfg);
+		this.addNumbers(el, "Quake span", "The default: how much of its edge it covers, in % (10 to 100). Top/bottom is a share of the width, left/right of the height.", 10, 100, [
+			{ label: "Top/bottom", value: q.span, set: (v) => (q.span = v) },
+			{ label: "Left/right", value: q.sideSpan, set: (v) => (q.sideSpan = v) },
+		], cfg);
+		this.addNumbers(el, "Quake slide duration", "In milliseconds (0 to 1000). 0 shows it instantly.", 0, 1000, [{ value: q.durationMs, set: (v) => (q.durationMs = v) }]);
 		new Setting(el)
-			.setName("Quake span")
-			.setDesc("How much of the edge it covers, in %.")
-			.addSlider((s) =>
-				s.setLimits(10, 100, 5).setValue(q.span).setDynamicTooltip().onChange((v) => {
-					q.span = v;
-					this.plugin.requestSave();
-				}),
-			);
-		new Setting(el)
-			.setName("Quake slide duration")
-			.setDesc("In milliseconds. 0 shows it instantly.")
-			.addSlider((s) =>
-				s.setLimits(0, 1000, 10).setValue(q.durationMs).setDynamicTooltip().onChange((v) => {
-					q.durationMs = v;
-					this.plugin.requestSave();
-				}),
-			);
+			.setName("Reset position and size")
+			.setDesc("Back to the defaults above on the current edge, centred. A Normal window forgets its saved position.")
+			.addButton((b) => b.setButtonText("Reset").onClick(() => this.plugin.resetWindow(cfg)));
 
 		new Setting(el).addButton((b) =>
 			b.setButtonText("Remove window").setWarning().onClick(() => {
@@ -130,6 +127,41 @@ export class HideawaySettingTab extends PluginSettingTab {
 				).open();
 			}),
 		);
+	}
+
+	/**
+	 * One or more whole-number fields in a row. Out-of-range values are clamped when you
+	 * leave a field or press Enter; empty or invalid input goes back to the last good value.
+	 */
+	private addNumbers(el: HTMLElement, name: string, desc: string, min: number, max: number, fields: { label?: string; value: number; set: (v: number) => void }[], live?: WindowConfig) {
+		const setting = new Setting(el).setName(name).setDesc(desc);
+		for (const field of fields) {
+			if (field.label) setting.controlEl.createSpan({ cls: "setting-item-description", text: field.label });
+			setting.addText((t) => {
+				let good = field.value;
+				t.inputEl.type = "number";
+				t.inputEl.min = String(min);
+				t.inputEl.max = String(max);
+				t.inputEl.step = "1";
+				t.inputEl.setCssProps({ width: "5em" });
+				t.setValue(String(good));
+				const commit = () => {
+					const typed = t.inputEl.value.trim();
+					const parsed = typed === "" ? NaN : Number(typed);
+					if (Number.isFinite(parsed)) good = Math.min(max, Math.max(min, Math.round(parsed)));
+					t.setValue(String(good));
+					if (good === field.value) return;
+					field.value = good;
+					field.set(good);
+					this.plugin.requestSave();
+					if (live) this.plugin.refreshQuake(live);
+				};
+				t.inputEl.addEventListener("blur", commit);
+				t.inputEl.addEventListener("keydown", (e) => {
+					if (e.key === "Enter") commit();
+				});
+			});
+		}
 	}
 
 	private renderHotkey(el: HTMLElement, cfg: WindowConfig, binding: HotkeyBinding, index: number, status?: HotkeyStatus) {
