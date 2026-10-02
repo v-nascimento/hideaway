@@ -6,3 +6,4 @@ release/
 .claude/settings.local.json
 .env
 QUAKE-CHANGES-PLAN.md
+ARCHITECTURE.md
