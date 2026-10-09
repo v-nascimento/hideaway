@@ -4,12 +4,12 @@ Give Obsidian pop-out windows their own system-wide hotkeys. Press a hotkey from
 
 <!-- screenshot: a Quake window sliding in from the top -->
 
-**Windows only.** Obsidian 1.13 or later, desktop.
+**Windows only.** Obsidian 1.13.1 or later, desktop.
 
 ## Getting started
 
-1. Open **Settings → Hideaway**. There's one window to start with, called *Scratch*.
-2. Click **Add hotkey**, then press the keys you want, for example `Ctrl + Alt + F10`.
+1. Open **Settings → Hideaway** and click the window there, called *Scratch* to start with.
+2. Next to **Hotkeys**, click **+** (Add hotkey), then **Set hotkey**, and press the keys you want, for example `Ctrl + Alt + F10`.
 3. Choose the mode for that hotkey: **Normal** or **Quake**.
 4. Press the hotkey from any app.
 
@@ -48,7 +48,7 @@ The window slides in from an edge of the monitor your mouse is on. On an edge ne
 
 ## Settings
 
-For each window: name, hotkeys and their modes, starting note, the starting edge for Quake mode, the default depth and span (in % of the screen, separately for top/bottom and left/right), and the animation duration (how long it slides or fades; 0 shows it instantly).
+Settings → Hideaway lists your windows; open one to edit it. For each window: name, starting note, hotkeys and their modes, the starting edge for Quake mode, the default depth and span (in % of the screen, separately for top/bottom and left/right), and the animation duration (how long it slides or fades; 0 shows it instantly). All of it is also found through Obsidian's settings search.
 
 Hotkeys need Ctrl, Alt, Shift or Win (F-keys can be used alone). Hideaway warns you when another app already uses a hotkey, and about `Ctrl + Alt + letter`, which types characters on many keyboard layouts. `Win + arrow` can't be used, because it moves Quake windows.
 

@@ -7,7 +7,9 @@
 }
 
 /* A Quake window is moved and resized from the page (quakeDrag.ts), so its title bar and tab bar
-   aren't the system's drag area while it's on an edge. */
+   aren't the system's drag area while it's on an edge. !important on purpose: Obsidian's own
+   drag-area selectors are very specific and change between versions; out-ranking them by copying
+   them would silently stop working after an Obsidian update. */
 .hideaway-quake-frame .titlebar,
 .hideaway-quake-frame .workspace-tab-header-container,
 .hideaway-quake-frame .workspace-tab-header-spacer {

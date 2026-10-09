@@ -1,201 +1,230 @@
-import { AbstractInputSuggest, App, ButtonComponent, Modal, PluginSettingTab, Scope, Setting, TFile } from "obsidian";
-import { Edge, EDGE_NAMES, HotkeyBinding, Mode, modeName, WindowConfig } from "./data";
-import { formatAccelerator, HOTKEY_PROBLEMS, HotkeyStatus, isAltGrRisk, recordKey } from "./hotkeys";
+import { App, ButtonComponent, Modal, PluginSettingTab, Scope, Setting, SettingDefinitionItem, SettingDefinitionPage, SettingGroupItem } from "obsidian";
+import { DEFAULT_QUAKE, Edge, EDGE_NAMES, HotkeyBinding, Mode, modeName, WindowConfig } from "./data";
+import { formatAccelerator, HOTKEY_PROBLEMS, isAltGrRisk, recordKey } from "./hotkeys";
 import type HideawayPlugin from "./main";
 
 const MODES: Mode[] = ["normal", "quake"];
 const EDGES: Edge[] = ["N", "S", "E", "W"];
 
+/** The per-window values edited with Obsidian's own controls. Their keys are `<window id>/<field>`. */
+type QuakeNumber = "depth" | "sideDepth" | "span" | "sideSpan" | "durationMs";
+type Field = "name" | "startingNote" | "edge" | QuakeNumber;
+
+/** Whole numbers within a range; anything else is shown as an error and not saved. */
+const wholeNumber = (min: number, max: number) => (value: number) =>
+	Number.isInteger(value) && value >= min && value <= max ? undefined : `Enter a whole number from ${min} to ${max}.`;
+
+/**
+ * Obsidian's declarative settings (1.13): one entry per window, each opening its own page.
+ * Obsidian renders the rows and makes them searchable; values are read and written through
+ * getControlValue / setControlValue. The key recorder rows are drawn by Hideaway itself.
+ */
 export class HideawaySettingTab extends PluginSettingTab {
-	/** Stops the key recorder, if one is running. */
-	private stopRecording: (() => void) | null = null;
+	/** Stops the key recorder, if one is running; `rerender` false when the row is being torn down anyway. */
+	private stopRecording: ((rerender: boolean) => void) | null = null;
 
 	constructor(app: App, private plugin: HideawayPlugin) {
 		super(app, plugin);
 	}
 
-	display() {
-		this.stopRecording?.();
-		const { containerEl } = this;
-		containerEl.empty();
-		containerEl.createEl("p", {
-			cls: "setting-item-description",
-			text: "Each window gets its own system-wide hotkeys: press one to show the window, press it again to hide it.",
-		});
-		for (const cfg of this.plugin.data.windows) this.renderWindow(containerEl, cfg);
-		new Setting(containerEl).addButton((b) =>
-			b.setButtonText("Add window").setCta().onClick(() => {
-				this.plugin.addWindow();
-				this.refresh();
-			}),
-		);
-	}
-
-	/** Redraws after a change without jumping back to the top. */
-	private refresh() {
-		// The settings page scrolls in this element or its parent, depending on the layout.
-		const scrollers = [this.containerEl, this.containerEl.parentElement].filter((e): e is HTMLElement => !!e);
-		const tops = scrollers.map((e) => e.scrollTop);
-		this.display();
-		scrollers.forEach((e, i) => (e.scrollTop = tops[i]));
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				name: "",
+				desc: "Each window gets its own system-wide hotkeys: press one to show the window, press it again to hide it.",
+				searchable: false,
+			},
+			{
+				type: "list",
+				heading: "Windows",
+				emptyState: "No windows yet.",
+				addItem: {
+					name: "Add window",
+					action: () => {
+						this.plugin.addWindow();
+						this.update();
+					},
+				},
+				onDelete: (index) => this.confirmRemove(this.plugin.data.windows[index]),
+				items: this.plugin.data.windows.map((cfg) => this.windowPage(cfg)),
+			},
+		];
 	}
 
 	hide() {
-		this.stopRecording?.();
-		// Apply a rename that's still waiting for typing to pause.
+		this.stopRecording?.(false);
+		// Apply a rename that's still waiting for typing to pause, and show the new name next time.
 		this.plugin.requestApply.run();
+		this.update();
 	}
 
-	private renderWindow(el: HTMLElement, cfg: WindowConfig) {
-		const heading = new Setting(el).setName(cfg.name || "Untitled").setHeading();
+	getControlValue(key: string): unknown {
+		const target = this.target(key);
+		if (!target) return undefined;
+		const { cfg, field } = target;
+		if (field === "name") return cfg.name;
+		if (field === "startingNote") return cfg.startingNote;
+		return cfg.quake[field];
+	}
 
-		new Setting(el).setName("Name").addText((t) =>
-			t.setValue(cfg.name).onChange((value) => {
-				cfg.name = value;
-				heading.setName(value || "Untitled");
-				this.plugin.requestApply();
-			}),
-		);
+	setControlValue(key: string, value: unknown) {
+		const target = this.target(key);
+		if (!target) return;
+		const { cfg, field } = target;
+		if (field === "name") {
+			cfg.name = typeof value === "string" ? value : "";
+			this.plugin.requestApply(); // command names follow once typing pauses
+			return;
+		}
+		if (field === "startingNote") cfg.startingNote = typeof value === "string" ? value.trim() : "";
+		else if (field === "edge") cfg.quake.edge = value as Edge;
+		else cfg.quake[field] = value as number;
+		this.plugin.requestSave();
+		// A shown Quake window follows new default sizes right away.
+		if (field !== "startingNote" && field !== "edge" && field !== "durationMs") this.plugin.refreshQuake(cfg);
+	}
 
-		const statuses = this.plugin.hotkeyStatus.get(cfg.id) ?? [];
-		cfg.hotkeys.forEach((binding, i) => this.renderHotkey(el, cfg, binding, i, statuses[i]));
-		new Setting(el)
-			.setName(cfg.hotkeys.length === 0 ? "Hotkeys" : "")
-			.setDesc(cfg.hotkeys.length === 0 ? "No hotkeys yet. Add one to show this window from any app. Its commands also work, while Obsidian is in front." : "")
-			.addButton((b) =>
-				b.setButtonText("Add hotkey").onClick(() => {
-					cfg.hotkeys.push({ accelerator: "", mode: "normal" });
-					this.plugin.applySettings();
-					this.refresh();
-				}),
-			);
+	/** The window and field a control key stands for. */
+	private target(key: string): { cfg: WindowConfig; field: Field } | null {
+		const slash = key.indexOf("/");
+		const cfg = this.plugin.data.windows.find((w) => w.id === key.slice(0, slash));
+		return cfg ? { cfg, field: key.slice(slash + 1) as Field } : null;
+	}
 
-		new Setting(el)
-			.setName("Starting note")
-			.setDesc("Opened when the window is new, or after all its tabs were closed. Leave empty for a new tab.")
-			.addText((t) => {
-				t.setPlaceholder("Folder/Note.md").setValue(cfg.startingNote);
-				t.onChange((value) => {
-					cfg.startingNote = value.trim();
-					this.plugin.requestSave();
-				});
-				const suggest = new NoteSuggest(this.app, t.inputEl);
-				suggest.onSelect((file) => {
-					t.setValue(file.path);
-					cfg.startingNote = file.path;
-					this.plugin.requestSave();
-					suggest.close();
-				});
-			});
-
-		const q = cfg.quake;
-		new Setting(el)
-			.setName("Starting edge")
-			.setDesc("Where the window first slides in. After that, it opens on the edge it was last on.")
-			.addDropdown((d) => {
-				for (const edge of EDGES) d.addOption(edge, EDGE_NAMES[edge]);
-				d.setValue(q.edge).onChange((value) => {
-					q.edge = value as Edge;
-					this.plugin.requestSave();
-				});
-			});
-		this.addNumbers(el, "Quake depth", "The default: how far a Quake window reaches in from its edge, in % of the screen (10 to 100). Top/bottom is a share of the height, left/right of the width.", 10, 100, [
-			{ label: "Top/bottom", value: q.depth, set: (v) => (q.depth = v) },
-			{ label: "Left/right", value: q.sideDepth, set: (v) => (q.sideDepth = v) },
-		], cfg);
-		this.addNumbers(el, "Quake span", "The default: how much of its edge it covers, in % (10 to 100). Top/bottom is a share of the width, left/right of the height.", 10, 100, [
-			{ label: "Top/bottom", value: q.span, set: (v) => (q.span = v) },
-			{ label: "Left/right", value: q.sideSpan, set: (v) => (q.sideSpan = v) },
-		], cfg);
-		this.addNumbers(el, "Animation duration", "How long the window slides or fades in and out, in milliseconds (0 to 1000). 0 shows it instantly.", 0, 1000, [{ value: q.durationMs, set: (v) => (q.durationMs = v) }]);
-		new Setting(el)
-			.setName("Reset position and size")
-			.setDesc("Back to the defaults above on the current edge, centred. In normal mode, it forgets its saved position instead.")
-			.addButton((b) => b.setButtonText("Reset").onClick(() => this.plugin.resetWindow(cfg)));
-
-		new Setting(el).addButton((b) =>
-			b.setButtonText("Remove window").setDestructive().onClick(() => {
-				new ConfirmModal(
-					this.app,
-					`Remove "${cfg.name || "Untitled"}"?`,
-					"Its hotkeys and commands are removed. If the window is open or hidden, it becomes an ordinary pop-out window with its tabs.",
-					"Remove",
-					() => {
-						this.plugin.removeWindow(cfg);
-						this.refresh();
+	private windowPage(cfg: WindowConfig): SettingDefinitionPage {
+		const key = (field: Field) => `${cfg.id}/${field}`;
+		const quakeNumber = (field: QuakeNumber, name: string, desc: string, min: number, max: number): SettingGroupItem => ({
+			name,
+			desc,
+			control: { type: "number", key: key(field), defaultValue: DEFAULT_QUAKE[field], min, max, step: 1, validate: wholeNumber(min, max) },
+		});
+		return {
+			type: "page",
+			name: cfg.name || "Untitled",
+			displayValue: () => this.hotkeySummary(cfg),
+			status: () => (this.hotkeyWarnings(cfg).some((w) => w.length > 0) ? "warning" : null),
+			items: [
+				{
+					type: "group",
+					items: [
+						{ name: "Name", control: { type: "text", key: key("name"), placeholder: "Untitled" } },
+						{
+							name: "Starting note",
+							desc: "Opened when the window is new, or after all its tabs were closed. Leave empty for a new tab.",
+							control: { type: "file", key: key("startingNote"), placeholder: "Folder/Note.md", filter: (file) => file.extension === "md" },
+						},
+					],
+				},
+				{
+					type: "list",
+					heading: "Hotkeys",
+					emptyState: "No hotkeys yet. Add one to show this window from any app. Its commands also work, while Obsidian is in front.",
+					addItem: {
+						name: "Add hotkey",
+						action: () => {
+							cfg.hotkeys.push({ accelerator: "", mode: "normal" });
+							this.plugin.applySettings();
+							this.update();
+						},
 					},
-				).open();
-			}),
-		);
+					onDelete: (index) => {
+						cfg.hotkeys.splice(index, 1);
+						this.plugin.applySettings();
+						this.update();
+					},
+					items: cfg.hotkeys.map((binding, index) => this.hotkeyRow(cfg, binding, index)),
+				},
+				{
+					type: "group",
+					heading: "Quake mode",
+					items: [
+						{
+							name: "Starting edge",
+							desc: "Where the window first slides in. After that, it opens on the edge it was last on.",
+							control: { type: "dropdown", key: key("edge"), defaultValue: DEFAULT_QUAKE.edge, options: Object.fromEntries(EDGES.map((e) => [e, EDGE_NAMES[e]])) },
+						},
+						quakeNumber("depth", "Depth at top and bottom", "The default: how far the window reaches in from the top or bottom edge, in % of the screen height (10 to 100).", 10, 100),
+						quakeNumber("sideDepth", "Depth at left and right", "The default: how far the window reaches in from the left or right edge, in % of the screen width (10 to 100).", 10, 100),
+						quakeNumber("span", "Span at top and bottom", "The default: how much of the top or bottom edge it covers, in % of the screen width (10 to 100).", 10, 100),
+						quakeNumber("sideSpan", "Span at left and right", "The default: how much of the left or right edge it covers, in % of the screen height (10 to 100).", 10, 100),
+						quakeNumber("durationMs", "Animation duration", "How long the window slides or fades in and out, in milliseconds (0 to 1000). 0 shows it instantly.", 0, 1000),
+						{
+							name: "Reset position and size",
+							desc: "Back to the defaults above on the current edge, centred. In normal mode, it forgets its saved position instead.",
+							render: (setting) => {
+								setting.addButton((b) => b.setButtonText("Reset").onClick(() => this.plugin.resetWindow(cfg)));
+							},
+						},
+					],
+				},
+			],
+		};
 	}
 
-	/**
-	 * One or more whole-number fields in a row. Out-of-range values are clamped when you
-	 * leave a field or press Enter; empty or invalid input goes back to the last good value.
-	 */
-	private addNumbers(el: HTMLElement, name: string, desc: string, min: number, max: number, fields: { label?: string; value: number; set: (v: number) => void }[], live?: WindowConfig) {
-		const setting = new Setting(el).setName(name).setDesc(desc);
-		for (const field of fields) {
-			if (field.label) setting.controlEl.createSpan({ cls: "setting-item-description", text: field.label });
-			setting.addText((t) => {
-				let good = field.value;
-				t.inputEl.type = "number";
-				t.inputEl.min = String(min);
-				t.inputEl.max = String(max);
-				t.inputEl.step = "1";
-				t.inputEl.setCssProps({ width: "5em" });
-				t.setValue(String(good));
-				const commit = () => {
-					const typed = t.inputEl.value.trim();
-					const parsed = typed === "" ? NaN : Number(typed);
-					if (Number.isFinite(parsed)) good = Math.min(max, Math.max(min, Math.round(parsed)));
-					t.setValue(String(good));
-					if (good === field.value) return;
-					field.value = good;
-					field.set(good);
-					this.plugin.requestSave();
-					if (live) this.plugin.refreshQuake(live);
-				};
-				t.inputEl.addEventListener("blur", commit);
-				t.inputEl.addEventListener("keydown", (e) => {
-					if (e.key === "Enter") commit();
+	/** One hotkey: the key recorder and the mode, with any warnings below the name. */
+	private hotkeyRow(cfg: WindowConfig, binding: HotkeyBinding, index: number): SettingGroupItem {
+		const warnings = this.hotkeyWarnings(cfg)[index];
+		return {
+			name: binding.accelerator ? formatAccelerator(binding.accelerator) : "Not set yet",
+			desc: createFragment((f) => {
+				for (const w of warnings) f.createDiv({ cls: "mod-warning", text: w });
+			}),
+			render: (setting) => {
+				setting.addButton((b) => {
+					b.setButtonText(binding.accelerator ? "Change" : "Set hotkey");
+					b.onClick(() => this.record(b, binding));
 				});
-			});
-		}
+				setting.addDropdown((d) => {
+					for (const mode of MODES) d.addOption(mode, modeName(mode));
+					d.setValue(binding.mode).onChange((value) => {
+						binding.mode = value as Mode;
+						this.plugin.applySettings();
+						this.update();
+					});
+				});
+				return () => this.stopRecording?.(false);
+			},
+		};
 	}
 
-	private renderHotkey(el: HTMLElement, cfg: WindowConfig, binding: HotkeyBinding, index: number, status?: HotkeyStatus) {
-		const row = new Setting(el).setName(index === 0 ? "Hotkeys" : "");
-		row.addButton((b) => {
-			b.setButtonText(binding.accelerator ? formatAccelerator(binding.accelerator) : "Click to set");
-			b.onClick(() => this.record(b, binding));
+	/** Per hotkey of the window, its problems as sentences (none: an empty list). */
+	private hotkeyWarnings(cfg: WindowConfig): string[][] {
+		const statuses = this.plugin.hotkeyStatus.get(cfg.id) ?? [];
+		return cfg.hotkeys.map((binding, i) => {
+			const warnings: string[] = [];
+			const status = statuses[i];
+			if (status && status !== "ok") warnings.push(`This hotkey ${HOTKEY_PROBLEMS[status]}.`);
+			if (binding.accelerator && isAltGrRisk(binding.accelerator)) {
+				warnings.push("Ctrl+Alt+key is AltGr+key on many keyboard layouts, so it may block typing a character.");
+			}
+			return warnings;
 		});
-		row.addDropdown((d) => {
-			for (const mode of MODES) d.addOption(mode, modeName(mode));
-			d.setValue(binding.mode).onChange((value) => {
-				binding.mode = value as Mode;
-				this.plugin.applySettings();
-			});
-		});
-		row.addExtraButton((b) =>
-			b.setIcon("trash").setTooltip("Remove hotkey").onClick(() => {
-				cfg.hotkeys.splice(cfg.hotkeys.indexOf(binding), 1);
-				this.plugin.applySettings();
-				this.refresh();
-			}),
-		);
+	}
 
-		const warnings: string[] = [];
-		if (status && status !== "ok") warnings.push(`This hotkey ${HOTKEY_PROBLEMS[status]}.`);
-		if (binding.accelerator && isAltGrRisk(binding.accelerator)) {
-			warnings.push("Ctrl+Alt+key is AltGr+key on many keyboard layouts, so it may block typing a character.");
-		}
-		for (const w of warnings) row.descEl.createDiv({ cls: "mod-warning", text: w });
+	/** Shown on the window's entry: its hotkeys and their modes. */
+	private hotkeySummary(cfg: WindowConfig): string {
+		const set = cfg.hotkeys.filter((h) => h.accelerator);
+		if (set.length === 0) return "No hotkeys";
+		return set.map((h) => `${formatAccelerator(h.accelerator)} (${modeName(h.mode)})`).join(", ");
+	}
+
+	private confirmRemove(cfg: WindowConfig | undefined) {
+		if (!cfg) return;
+		new ConfirmModal(
+			this.app,
+			`Remove "${cfg.name || "Untitled"}"?`,
+			"Its hotkeys and commands are removed. If the window is open or hidden, it becomes an ordinary pop-out window with its tabs.",
+			"Remove",
+			() => {
+				this.plugin.removeWindow(cfg);
+				this.update();
+			},
+		).open();
 	}
 
 	/** Click-and-press key recorder. Esc cancels; clicking elsewhere cancels too. */
 	private record(button: ButtonComponent, binding: HotkeyBinding) {
-		this.stopRecording?.();
+		this.stopRecording?.(true);
 		// Hideaway's own hotkeys would otherwise catch the keys before we see them.
 		this.plugin.suspendHotkeys();
 		button.setButtonText("Press keys… (escape to cancel)");
@@ -203,7 +232,7 @@ export class HideawaySettingTab extends PluginSettingTab {
 		// A scope on top of Obsidian's catches every key, so Esc doesn't close settings.
 		const scope = new Scope(this.app.scope);
 		let done = false;
-		const finish = (accelerator: string | null) => {
+		const finish = (accelerator: string | null, rerender: boolean) => {
 			if (done) return;
 			done = true;
 			this.app.keymap.popScope(scope);
@@ -211,34 +240,19 @@ export class HideawaySettingTab extends PluginSettingTab {
 			this.stopRecording = null;
 			if (accelerator) binding.accelerator = accelerator;
 			this.plugin.applySettings(); // registers the hotkeys again, including the new one
-			this.refresh();
+			if (rerender) this.update();
 		};
-		const onBlur = () => finish(null);
+		const onBlur = () => finish(null, true);
 		scope.register(null, null, (evt) => {
 			const result = recordKey(evt);
-			if (result.kind === "key") finish(result.accelerator);
-			else if (result.kind === "cancel") finish(null);
+			if (result.kind === "key") finish(result.accelerator, true);
+			else if (result.kind === "cancel") finish(null, true);
 			else if (result.kind === "rejected") button.setButtonText(result.reason);
 			return false;
 		});
 		this.app.keymap.pushScope(scope);
 		button.buttonEl.addEventListener("blur", onBlur);
-		this.stopRecording = () => finish(null);
-	}
-}
-
-class NoteSuggest extends AbstractInputSuggest<TFile> {
-	constructor(private vaultApp: App, inputEl: HTMLInputElement) {
-		super(vaultApp, inputEl);
-	}
-
-	protected getSuggestions(query: string): TFile[] {
-		const q = query.toLowerCase();
-		return this.vaultApp.vault.getMarkdownFiles().filter((f) => f.path.toLowerCase().includes(q)).slice(0, 50);
-	}
-
-	renderSuggestion(file: TFile, el: HTMLElement) {
-		el.setText(file.path);
+		this.stopRecording = (rerender) => finish(null, rerender);
 	}
 }
 
