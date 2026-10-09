@@ -27,6 +27,7 @@ export interface NativeWindow {
 	setBounds(rect: Rect): void;
 	getTitle(): string;
 	show(): void;
+	showInactive(): void;
 	hide(): void;
 	focus(): void;
 	minimize(): void;
@@ -167,11 +168,15 @@ export class Native {
 		return rect.x <= PARKED / 2 && rect.y <= PARKED / 2;
 	}
 
-	/** Un-minimizes invisibly, so Windows doesn't animate it up from the taskbar. */
+	/**
+	 * Un-minimizes invisibly, so Windows doesn't animate it up from the taskbar. Without taking
+	 * focus: restoring activated it, and the hide right after handed focus away, after which
+	 * Windows refused the focus asked for when the window slides in.
+	 */
 	unminimize(win: NativeWindow) {
 		if (!win.isMinimized()) return;
 		win.setOpacity(0);
-		win.restore();
+		win.showInactive();
 		win.hide();
 	}
 
@@ -217,6 +222,11 @@ export class Native {
 	/** The usable area of every monitor. */
 	workAreas(): Rect[] {
 		return this.remote.screen.getAllDisplays().map((d) => d.workArea);
+	}
+
+	/** Every monitor's whole screen, taskbar included. */
+	screens(): Rect[] {
+		return this.remote.screen.getAllDisplays().map((d) => d.bounds);
 	}
 
 	cursorWorkArea(): Rect {

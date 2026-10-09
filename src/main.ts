@@ -1,4 +1,4 @@
-import { debounce, Notice, Plugin } from "obsidian";
+import { debounce, Notice, Platform, Plugin } from "obsidian";
 import { DEFAULT_QUAKE, defaultData, Edge, EDGE_NAMES, HideawayData, migrate, modeName, WindowConfig } from "./data";
 import { Native } from "./electron";
 import { HOTKEY_PROBLEMS, HotkeyStatus, isWinArrow } from "./hotkeys";
@@ -25,7 +25,7 @@ export default class HideawayPlugin extends Plugin {
 	requestApply = debounce(() => this.applySettings(), 500, true);
 
 	async onload() {
-		if (process.platform !== "win32") {
+		if (!Platform.isWin) {
 			new Notice("Hideaway currently supports Windows only.");
 			return;
 		}
@@ -37,9 +37,10 @@ export default class HideawayPlugin extends Plugin {
 		await this.loadSettings();
 		this.windows = new WindowManager(this, this.native);
 		this.addWindowCommands();
-		this.addCommand({ id: "reset-focused", name: "Reset Hideaway window", callback: () => this.windows?.resetFocused() });
+		this.addCommand({ id: "reset-focused", name: "Reset the window in front", callback: () => this.windows?.resetFocused() });
 		this.registerHotkeys(true);
 		this.register(() => this.windows?.releaseAll());
+		this.register(() => this.unregisterHotkeys());
 		this.addSettingTab(new HideawaySettingTab(this.app, this));
 
 		const layoutChanged = debounce(() => this.windows?.onLayoutChange(), 300, true);
@@ -49,7 +50,6 @@ export default class HideawayPlugin extends Plugin {
 	}
 
 	onunload() {
-		this.unregisterHotkeys();
 		this.requestSave.run();
 	}
 

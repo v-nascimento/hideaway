@@ -61,7 +61,7 @@ export class HideawaySettingTab extends PluginSettingTab {
 		cfg.hotkeys.forEach((binding, i) => this.renderHotkey(el, cfg, binding, i, statuses[i]));
 		new Setting(el)
 			.setName(cfg.hotkeys.length === 0 ? "Hotkeys" : "")
-			.setDesc(cfg.hotkeys.length === 0 ? "No hotkeys yet. Commands work too, while Obsidian is in front." : "")
+			.setDesc(cfg.hotkeys.length === 0 ? "No hotkeys yet. Add one to show this window from any app. Its commands also work, while Obsidian is in front." : "")
 			.addButton((b) =>
 				b.setButtonText("Add hotkey").onClick(() => {
 					cfg.hotkeys.push({ accelerator: "", mode: "normal" });

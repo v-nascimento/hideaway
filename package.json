@@ -1,12 +1,14 @@
 {
   "name": "hideaway",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
+  "author": "vit0so",
+  "license": "MIT",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "deploy": "node scripts/deploy.mjs"
+    "deploy": "node --env-file-if-exists=.env scripts/deploy.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

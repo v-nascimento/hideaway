@@ -119,7 +119,7 @@ export function defaultData(): HideawayData {
 			{
 				id: "scratch",
 				name: "Scratch",
-				hotkeys: [{ accelerator: "Control+Alt+F10", mode: "normal" }],
+				hotkeys: [],
 				startingNote: "",
 				quake: { ...DEFAULT_QUAKE },
 			},

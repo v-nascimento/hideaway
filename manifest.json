@@ -1,9 +1,9 @@
 {
   "id": "hideaway",
   "name": "Hideaway",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.13.0",
-  "description": "Give pop-out windows their own system-wide hotkey, with an optional Quake-style slide-in mode.",
-  "author": "",
+  "description": "Give pop-out windows their own system-wide hotkey, with an optional Quake-style slide-in mode. Windows only.",
+  "author": "vit0so",
   "isDesktopOnly": true
 }

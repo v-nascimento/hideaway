@@ -2,7 +2,7 @@ import { debounce, Notice, TFile, WorkspaceLeaf, WorkspaceWindow } from "obsidia
 import type HideawayPlugin from "./main";
 import { defaultPlacement, Edge, Mode, QuakePlacement, WindowConfig, WindowState } from "./data";
 import type { Native, NativeEvent, NativeInput, NativeWindow, Rect } from "./electron";
-import { alongAxis, edgeAtPoint, isDefaultPlacement, move, neighbourArea, OPPOSITE, overlapAlong, placementFromRect, quakeRect, resizeRect, slide } from "./quake";
+import { alongAxis, edgeAtPoint, isDefaultPlacement, move, neighbourArea, OPPOSITE, overlapAlong, placementFromRect, quakeRect, resizeRect, slide, slidesOnScreen } from "./quake";
 import { QuakeButton } from "./quakeButton";
 import { QuakeFrame } from "./quakeDrag";
 
@@ -643,7 +643,7 @@ export class WindowManager {
 		});
 	}
 
-	/** The "Reset Hideaway window" command: resets whichever Hideaway window is in front. */
+	/** The "Reset the window in front" command: resets whichever Hideaway window is in front. */
 	resetFocused() {
 		const lw = [...this.live.values()].find((l) => l.wantVisible && (l.win.isFocused() || l.ww.doc === activeDocument));
 		if (lw) void this.reset(lw.cfg);
@@ -670,14 +670,14 @@ export class WindowManager {
 	}
 
 	/**
-	 * Win+arrow and "Move to …": a window not yet on that edge goes to it; one already
-	 * there hops to the monitor beyond it (if any), arriving on that monitor's facing edge.
+	 * Win+arrow and "Move to …": a window not yet on that edge slides to it; one already there
+	 * crosses into the monitor beyond it (if any) in one movement, arriving on that monitor's facing edge.
 	 */
 	private async stepToward(lw: LiveWindow, edge: Edge) {
 		const q = lw.quake!;
 		if (edge === q.edge) {
 			const next = neighbourArea(this.native.workAreas(), q.area, edge);
-			if (next) return this.slideToEdge(lw, OPPOSITE[edge], next);
+			if (next) return this.relocate(lw, OPPOSITE[edge], next);
 		}
 		return this.slideToEdge(lw, edge, q.area);
 	}
@@ -695,13 +695,14 @@ export class WindowManager {
 		await this.show(lw, "quake", area);
 	}
 
-	/** Moves a shown Quake window to another edge or monitor straight from where it is (after a mouse drop). */
+	/** Moves a shown Quake window to another edge or monitor straight from where it is, never showing beyond the two monitors. */
 	private async relocate(lw: LiveWindow, edge: Edge, area: Rect) {
 		this.plugin.log(`${lw.cfg.name}: relocate to ${edge}`);
+		const from = lw.quake!.area;
 		await this.leaveEdgeGroup(lw, true);
 		const { members, rects } = this.enterEdgeGroup(lw, edge, area);
 		await Promise.all([
-			move(lw.win, lw.quake!.rect, lw.ww.win, lw.cfg.quake.durationMs),
+			move(lw.win, lw.quake!.rect, lw.ww.win, lw.cfg.quake.durationMs, [from, area]),
 			...this.moveMembers(members.filter((m) => m !== lw), rects),
 		]);
 		lw.win.setBounds(lw.quake!.rect);
@@ -741,6 +742,7 @@ export class WindowManager {
 					area,
 					edge,
 					durationMs: lw.cfg.quake.durationMs,
+					fade: slidesOnScreen(lw.quake!.rect, edge, this.native.screens()),
 					onShown: () => this.focus(lw),
 				}),
 			),
@@ -760,6 +762,7 @@ export class WindowManager {
 					area: q.area,
 					edge: q.edge,
 					durationMs: lw.cfg.quake.durationMs,
+					fade: slidesOnScreen(from, q.edge, this.native.screens()),
 					onGone: () => this.native.hide(lw.win, !switching),
 				}),
 			),

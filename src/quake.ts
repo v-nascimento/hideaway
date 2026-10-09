@@ -182,6 +182,16 @@ function beyondEdge(r: Rect, edge: Edge): Rect {
 	}
 }
 
+/**
+ * True when sliding through `edge` would put part of the window on a screen outside its usable
+ * area: another monitor, or its own taskbar. Clipping no longer takes effect in time there
+ * (Electron 43, PLAN findings), so it fades instead.
+ */
+export function slidesOnScreen(rect: Rect, edge: Edge, screens: Rect[]): boolean {
+	const beyond = beyondEdge(rect, edge);
+	return screens.some((s) => intersect(beyond, s) !== null);
+}
+
 /** Moves a rect `px` back towards the monitor from past the edge. */
 function nudgeIn(r: Rect, edge: Edge, px: number): Rect {
 	switch (edge) {
@@ -249,6 +259,8 @@ export interface SlideOptions {
 	area: Rect;
 	edge: Edge;
 	durationMs: number;
+	/** Fade in or out where the window sits instead of sliding (see `slidesOnScreen`). */
+	fade?: boolean;
 	/** Sliding in: called once the window first becomes visible. */
 	onShown?: () => void;
 	/** Sliding out: called once the window is fully off the monitor; must hide it. */
@@ -261,6 +273,7 @@ export interface SlideOptions {
  * from the first frame.
  */
 export async function slide(dir: "in" | "out", rect: Rect, o: SlideOptions): Promise<void> {
+	if (o.fade) return fadeInPlace(dir, rect, o);
 	const outside = beyondEdge(rect, o.edge);
 	const from = dir === "in" ? nudgeIn(outside, o.edge, 1) : rect;
 	const to = dir === "in" ? rect : outside;
@@ -303,11 +316,48 @@ export async function slide(dir: "in" | "out", rect: Rect, o: SlideOptions): Pro
 	}
 }
 
-/** Animates a visible Quake window to a new place (when the windows sharing its edge change). */
-export function move(win: NativeWindow, to: Rect, clock: Window, durationMs: number): Promise<void> {
+/** Faintest opacity while fading: a fully transparent window may stop getting frames, which would stall the fade. */
+const FADE_FLOOR = 0.01;
+
+/** Fades a Quake window in at `rect`, or out where it is, so no part of it ever leaves its monitor. */
+async function fadeInPlace(dir: "in" | "out", rect: Rect, o: SlideOptions): Promise<void> {
+	const opacity = (p: number) => {
+		o.win.setOpacity(Math.max(FADE_FLOOR, dir === "in" ? p : 1 - p));
+		return true;
+	};
+	if (dir === "in") {
+		o.win.setShape([]);
+		o.win.setOpacity(FADE_FLOOR);
+		o.win.setBounds(rect);
+		o.win.show();
+		o.onShown?.();
+		await animate(o.clock, o.durationMs, opacity);
+		o.win.setOpacity(1);
+	} else {
+		await animate(o.clock, o.durationMs, opacity, easeIn);
+		o.onGone?.();
+	}
+}
+
+/**
+ * Animates a visible Quake window to a new place (when the windows sharing its edge change, or
+ * when it crosses to another edge or monitor). With `clipTo`, only the parts over those monitors show.
+ */
+export function move(win: NativeWindow, to: Rect, clock: Window, durationMs: number, clipTo?: Rect[]): Promise<void> {
 	const from = win.getBounds();
 	return animate(clock, durationMs, (p) => {
-		win.setBounds(lerp(from, to, p));
+		const r = lerp(from, to, p);
+		if (clipTo) win.setShape(clipRegion(r, clipTo));
+		win.setBounds(r);
 		return true;
+	}).then(() => {
+		if (clipTo) win.setShape([]); // fully rectangular again, so the inner edge can be dragged
 	});
+}
+
+/** The parts of `r` over `areas`, relative to `r`, for setShape. An empty list would show the whole window, so "nothing" is a zero-size rect. */
+function clipRegion(r: Rect, areas: Rect[]): Rect[] {
+	const parts = areas.map((a) => intersect(r, a)).filter((c): c is Rect => !!c);
+	if (parts.length === 0) return [{ x: 0, y: 0, width: 0, height: 0 }];
+	return parts.map((c) => ({ x: c.x - r.x, y: c.y - r.y, width: c.width, height: c.height }));
 }
