@@ -1,5 +1,6 @@
-# Pushing a version tag (e.g. 0.3.0) builds the plugin and creates a draft release
-# with main.js, manifest.json and styles.css. Review the draft, then publish it.
+# Pushing a version tag (e.g. 0.3.0) builds the plugin, signs where its files came from
+# (artifact attestations) and creates a draft release with main.js, manifest.json and
+# styles.css. Review the draft, then publish it.
 name: Release
 
 on:
@@ -9,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write # for the attestation's signature
+  attestations: write # to store it
 
 jobs:
   release:
@@ -35,6 +38,14 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       - name: Create draft release
         env:
