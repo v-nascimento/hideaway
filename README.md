@@ -28,7 +28,7 @@ A window can have several hotkeys, each with its own mode.
 
 ### Normal mode
 
-The window shows where you left it, like an ordinary window, and appears in the taskbar while shown.
+The window fades in where you left it, like an ordinary window, and appears in the taskbar while shown. It fades out when you hide it.
 
 ### Quake mode
 
@@ -48,7 +48,7 @@ The window slides in from an edge of the monitor your mouse is on. On an edge ne
 
 ## Settings
 
-For each window: name, hotkeys and their modes, starting note, the starting edge for Quake mode, the default depth and span (in % of the screen, separately for top/bottom and left/right), and the slide duration.
+For each window: name, hotkeys and their modes, starting note, the starting edge for Quake mode, the default depth and span (in % of the screen, separately for top/bottom and left/right), and the animation duration (how long it slides or fades; 0 shows it instantly).
 
 Hotkeys need Ctrl, Alt, Shift or Win (F-keys can be used alone). Hideaway warns you when another app already uses a hotkey, and about `Ctrl + Alt + letter`, which types characters on many keyboard layouts. `Win + arrow` can't be used, because it moves Quake windows.
 

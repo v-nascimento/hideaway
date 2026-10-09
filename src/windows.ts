@@ -2,7 +2,7 @@ import { debounce, Notice, TFile, WorkspaceLeaf, WorkspaceWindow } from "obsidia
 import type HideawayPlugin from "./main";
 import { defaultPlacement, Edge, Mode, QuakePlacement, WindowConfig, WindowState } from "./data";
 import type { Native, NativeEvent, NativeInput, NativeWindow, Rect } from "./electron";
-import { alongAxis, edgeAtPoint, isDefaultPlacement, move, neighbourArea, OPPOSITE, overlapAlong, placementFromRect, quakeRect, resizeRect, slide, slidesOnScreen } from "./quake";
+import { alongAxis, edgeAtPoint, fade, FADE_FLOOR, isDefaultPlacement, move, neighbourArea, OPPOSITE, overlapAlong, placementFromRect, quakeRect, resizeRect, slide, slidesOnScreen } from "./quake";
 import { QuakeButton } from "./quakeButton";
 import { QuakeFrame } from "./quakeDrag";
 
@@ -591,8 +591,9 @@ export class WindowManager {
 			lw.button.remove();
 			lw.frame.sync(null);
 			this.native.setQuakeStyle(lw.win, false);
-			this.native.showAt(lw.win, this.normalRect(lw.cfg));
+			this.native.showAt(lw.win, this.normalRect(lw.cfg), FADE_FLOOR);
 			this.focus(lw);
+			await this.animated(lw, () => fade("in", lw.win, lw.ww.win, lw.cfg.quake.durationMs));
 		} else {
 			await this.showQuake(lw, area);
 		}
@@ -612,7 +613,10 @@ export class WindowManager {
 		this.rememberNormalRect(lw);
 		lw.wantVisible = false;
 		if (lw.quake) await this.hideQuake(lw, switching);
-		else this.native.hide(lw.win, !switching);
+		else {
+			await this.animated(lw, () => fade("out", lw.win, lw.ww.win, lw.cfg.quake.durationMs));
+			this.native.hide(lw.win, !switching);
+		}
 		if (switching) return;
 		this.native.park(lw.win);
 		// Moving a window isn't a layout change, so ask Obsidian to save the parked

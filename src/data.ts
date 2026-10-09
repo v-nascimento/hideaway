@@ -25,6 +25,7 @@ export interface QuakeConfig {
 	/** The same two defaults for the left and right edges: % of the monitor's width, and of its height. */
 	sideDepth: number;
 	sideSpan: number;
+	/** How long a slide or fade takes, in ms; also used for Normal mode's fade. */
 	durationMs: number;
 }
 

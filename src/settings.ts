@@ -107,7 +107,7 @@ export class HideawaySettingTab extends PluginSettingTab {
 			{ label: "Top/bottom", value: q.span, set: (v) => (q.span = v) },
 			{ label: "Left/right", value: q.sideSpan, set: (v) => (q.sideSpan = v) },
 		], cfg);
-		this.addNumbers(el, "Quake slide duration", "In milliseconds (0 to 1000). 0 shows it instantly.", 0, 1000, [{ value: q.durationMs, set: (v) => (q.durationMs = v) }]);
+		this.addNumbers(el, "Animation duration", "How long the window slides or fades in and out, in milliseconds (0 to 1000). 0 shows it instantly.", 0, 1000, [{ value: q.durationMs, set: (v) => (q.durationMs = v) }]);
 		new Setting(el)
 			.setName("Reset position and size")
 			.setDesc("Back to the defaults above on the current edge, centred. A Normal window forgets its saved position.")

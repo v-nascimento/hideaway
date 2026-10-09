@@ -317,24 +317,33 @@ export async function slide(dir: "in" | "out", rect: Rect, o: SlideOptions): Pro
 }
 
 /** Faintest opacity while fading: a fully transparent window may stop getting frames, which would stall the fade. */
-const FADE_FLOOR = 0.01;
+export const FADE_FLOOR = 0.01;
+
+/** Fades a shown window in or out where it is (Normal mode, and Quake edges with a screen beyond). */
+export async function fade(dir: "in" | "out", win: NativeWindow, clock: Window, durationMs: number): Promise<void> {
+	await animate(
+		clock,
+		durationMs,
+		(p) => {
+			win.setOpacity(Math.max(FADE_FLOOR, dir === "in" ? p : 1 - p));
+			return true;
+		},
+		dir === "in" ? easeOut : easeIn,
+	);
+	if (dir === "in") win.setOpacity(1);
+}
 
 /** Fades a Quake window in at `rect`, or out where it is, so no part of it ever leaves its monitor. */
 async function fadeInPlace(dir: "in" | "out", rect: Rect, o: SlideOptions): Promise<void> {
-	const opacity = (p: number) => {
-		o.win.setOpacity(Math.max(FADE_FLOOR, dir === "in" ? p : 1 - p));
-		return true;
-	};
 	if (dir === "in") {
 		o.win.setShape([]);
 		o.win.setOpacity(FADE_FLOOR);
 		o.win.setBounds(rect);
 		o.win.show();
 		o.onShown?.();
-		await animate(o.clock, o.durationMs, opacity);
-		o.win.setOpacity(1);
+		await fade("in", o.win, o.clock, o.durationMs);
 	} else {
-		await animate(o.clock, o.durationMs, opacity, easeIn);
+		await fade("out", o.win, o.clock, o.durationMs);
 		o.onGone?.();
 	}
 }

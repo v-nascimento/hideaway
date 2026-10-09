@@ -192,11 +192,11 @@ export class Native {
 		win.setMinimizable(!quake);
 	}
 
-	/** Shows a window fully, at the given position. */
-	showAt(win: NativeWindow, rect: Rect) {
+	/** Shows a window at the given position, fully or (to fade in from there) nearly transparent. */
+	showAt(win: NativeWindow, rect: Rect, opacity = 1) {
 		win.setShape([]);
 		win.setBounds(rect);
-		win.setOpacity(1);
+		win.setOpacity(opacity);
 		win.show();
 	}
 
