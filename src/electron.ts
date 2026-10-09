@@ -15,6 +15,9 @@ export interface NativeInput {
 	meta: boolean;
 }
 
+/** An Electron event listener. Its arguments depend on the event, so any function fits. */
+export type Listener = (...args: never[]) => void;
+
 /** The parts of Electron's BrowserWindow that Hideaway uses. */
 export interface NativeWindow {
 	isDestroyed(): boolean;
@@ -38,11 +41,11 @@ export interface NativeWindow {
 	setResizable(resizable: boolean): void;
 	setMinimizable(minimizable: boolean): void;
 	setShape(rects: Rect[]): void;
-	on(event: string, listener: (...args: any[]) => void): void;
-	removeListener(event: string, listener: (...args: any[]) => void): void;
+	on(event: string, listener: Listener): void;
+	removeListener(event: string, listener: Listener): void;
 	webContents: {
-		on(event: string, listener: (...args: any[]) => void): void;
-		removeListener(event: string, listener: (...args: any[]) => void): void;
+		on(event: string, listener: Listener): void;
+		removeListener(event: string, listener: Listener): void;
 	};
 }
 
@@ -74,7 +77,7 @@ const PARKED = -32000;
 // reloaded copy can take back shortcuts an old copy failed to release.
 const OWNED_SHORTCUTS = "__hideawayShortcuts";
 
-const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
 export function intersect(a: Rect, b: Rect): Rect | null {
 	const x = Math.max(a.x, b.x);
@@ -90,8 +93,10 @@ export class Native {
 	/** Returns null when Electron isn't reachable (e.g. mobile). */
 	static connect(): Native | null {
 		try {
-			const electron = require("electron");
-			const remote = electron.remote ?? require("@electron/remote");
+			// eslint-disable-next-line @typescript-eslint/no-require-imports -- Electron only exists at runtime inside Obsidian, so it can't be imported at build time.
+			const electron = require("electron") as { remote?: Remote };
+			// eslint-disable-next-line @typescript-eslint/no-require-imports -- the fallback for when Obsidian doesn't expose `remote` on Electron itself.
+			const remote = electron.remote ?? (require("@electron/remote") as Remote | undefined);
 			return remote ? new Native(remote) : null;
 		} catch {
 			return null;
@@ -119,7 +124,7 @@ export class Native {
 		return this.remote.getCurrentWindow();
 	}
 
-	listen(win: NativeWindow, event: string, listener: (...args: any[]) => void): () => void {
+	listen(win: NativeWindow, event: string, listener: Listener): () => void {
 		win.on(event, listener);
 		return () => {
 			try {

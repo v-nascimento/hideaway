@@ -91,7 +91,7 @@ export class HideawaySettingTab extends PluginSettingTab {
 		const q = cfg.quake;
 		new Setting(el)
 			.setName("Starting edge")
-			.setDesc("Where Quake mode opens the first time. After that it opens on the edge it was last on.")
+			.setDesc("Where the window first slides in. After that, it opens on the edge it was last on.")
 			.addDropdown((d) => {
 				for (const edge of EDGES) d.addOption(edge, EDGE_NAMES[edge]);
 				d.setValue(q.edge).onChange((value) => {
@@ -110,11 +110,11 @@ export class HideawaySettingTab extends PluginSettingTab {
 		this.addNumbers(el, "Animation duration", "How long the window slides or fades in and out, in milliseconds (0 to 1000). 0 shows it instantly.", 0, 1000, [{ value: q.durationMs, set: (v) => (q.durationMs = v) }]);
 		new Setting(el)
 			.setName("Reset position and size")
-			.setDesc("Back to the defaults above on the current edge, centred. A Normal window forgets its saved position.")
+			.setDesc("Back to the defaults above on the current edge, centred. In normal mode, it forgets its saved position instead.")
 			.addButton((b) => b.setButtonText("Reset").onClick(() => this.plugin.resetWindow(cfg)));
 
 		new Setting(el).addButton((b) =>
-			b.setButtonText("Remove window").setWarning().onClick(() => {
+			b.setButtonText("Remove window").setDestructive().onClick(() => {
 				new ConfirmModal(
 					this.app,
 					`Remove "${cfg.name || "Untitled"}"?`,
@@ -198,7 +198,7 @@ export class HideawaySettingTab extends PluginSettingTab {
 		this.stopRecording?.();
 		// Hideaway's own hotkeys would otherwise catch the keys before we see them.
 		this.plugin.suspendHotkeys();
-		button.setButtonText("Press keys… (Esc to cancel)");
+		button.setButtonText("Press keys… (escape to cancel)");
 
 		// A scope on top of Obsidian's catches every key, so Esc doesn't close settings.
 		const scope = new Scope(this.app.scope);
@@ -253,7 +253,7 @@ class ConfirmModal extends Modal {
 		new Setting(this.contentEl)
 			.addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
 			.addButton((b) =>
-				b.setButtonText(this.action).setWarning().onClick(() => {
+				b.setButtonText(this.action).setDestructive().onClick(() => {
 					this.close();
 					this.onConfirm();
 				}),

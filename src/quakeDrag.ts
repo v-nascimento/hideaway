@@ -15,6 +15,9 @@ const GRIPS: Record<Edge, Side[][]> = {
 	E: [["t"], ["b"], ["l"], ["l", "t"], ["l", "b"]],
 };
 
+/** On the pop-out's body while Hideaway moves and resizes it from the page (see styles.css). */
+const FRAME_CLASS = "hideaway-quake-frame";
+
 const THIN = 6; // px
 const CORNER = 14; // px
 
@@ -48,7 +51,6 @@ export interface FrameHandlers {
 }
 
 export class QuakeFrame {
-	private style: HTMLStyleElement | null = null;
 	private grips: HTMLElement[] = [];
 	private edge: Edge | null = null;
 	private offDown: (() => void) | null = null;
@@ -70,15 +72,13 @@ export class QuakeFrame {
 		this.clearGrips();
 		this.offDown?.();
 		this.offDown = null;
-		this.style?.remove();
-		this.style = null;
+		this.doc.body.removeClass(FRAME_CLASS);
 	}
 
 	private enable() {
-		// Obsidian marks these as the system's drag area; take that away so the pointer reaches the page.
-		this.style = this.doc.createElement("style");
-		this.style.textContent = ".titlebar, .workspace-tab-header-container, .workspace-tab-header-spacer { -webkit-app-region: no-drag !important; }";
-		this.doc.head.appendChild(this.style);
+		// Obsidian marks the title bar and tab bar as the system's drag area; this class takes
+		// that away (styles.css) so the pointer reaches the page.
+		this.doc.body.addClass(FRAME_CLASS);
 		const onDown = (e: PointerEvent) => {
 			const target = e.target as Element | null;
 			if (e.button === 0 && target && isHandle(target)) this.track(e, null);
@@ -94,7 +94,7 @@ export class QuakeFrame {
 
 	/** An invisible strip along a side, or a square at a corner, that starts a resize. */
 	private addGrip(sides: Side[]) {
-		const el = this.doc.createElement("div");
+		const el = this.doc.body.createDiv();
 		const s = el.style;
 		s.position = "fixed";
 		s.zIndex = sides.length > 1 ? "100001" : "100000";
@@ -117,7 +117,6 @@ export class QuakeFrame {
 		el.addEventListener("pointerdown", (e) => {
 			if (e.button === 0) this.track(e, sides);
 		});
-		this.doc.body.appendChild(el);
 		this.grips.push(el);
 	}
 

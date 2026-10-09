@@ -1,7 +1,7 @@
 import { debounce, Notice, TFile, WorkspaceLeaf, WorkspaceWindow } from "obsidian";
 import type HideawayPlugin from "./main";
-import { defaultPlacement, Edge, Mode, QuakePlacement, WindowConfig, WindowState } from "./data";
-import type { Native, NativeEvent, NativeInput, NativeWindow, Rect } from "./electron";
+import { defaultPlacement, Edge, LayoutNode, Mode, QuakePlacement, WindowConfig, WindowState } from "./data";
+import type { Listener, Native, NativeEvent, NativeInput, NativeWindow, Rect } from "./electron";
 import { alongAxis, edgeAtPoint, fade, FADE_FLOOR, isDefaultPlacement, move, neighbourArea, OPPOSITE, overlapAlong, placementFromRect, quakeRect, resizeRect, slide, slidesOnScreen } from "./quake";
 import { QuakeButton } from "./quakeButton";
 import { QuakeFrame } from "./quakeDrag";
@@ -15,7 +15,10 @@ const FLUSH_SIDE: Record<Edge, string> = { N: "top", S: "bottom", W: "left", E: 
 
 const sameRect = (a: Rect, b: Rect) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 
-const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+/** A caught error as text, for the log and notices. */
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** A named window that currently exists (shown or hidden). */
 interface LiveWindow {
@@ -46,8 +49,11 @@ interface QuakePlace {
 	rect: Rect;
 }
 
+/** Obsidian's id of a pop-out or a tab: kept in its saved layout, but not part of the public API. */
+const idOf = (item: WorkspaceWindow | WorkspaceLeaf) => (item as unknown as { id: string }).id;
+
 /** Compact description of a layout tree, for the debug log. */
-function shape(node: any): string {
+function shape(node: LayoutNode | undefined): string {
 	if (!node) return "?";
 	if (node.type === "leaf") return "L";
 	const kids = (node.children ?? []).map(shape).join(",");
@@ -94,14 +100,15 @@ export class WindowManager {
 		let found: WorkspaceWindow | null = null;
 		this.app.workspace.iterateAllLeaves((leaf) => {
 			const c = leaf.getContainer();
-			if (c instanceof WorkspaceWindow && (c as any).id === id) found = c;
+			if (c instanceof WorkspaceWindow && idOf(c) === id) found = c;
 		});
 		return found;
 	}
 
-	private layoutOf(ww: WorkspaceWindow): any {
-		const layout = this.app.workspace.getLayout() as any;
-		return layout?.floating?.children?.find((c: any) => c.id === (ww as any).id);
+	/** This pop-out's part of Obsidian's layout, which keeps pop-outs under `floating` (not public API). */
+	private layoutOf(ww: WorkspaceWindow): LayoutNode | undefined {
+		const layout = this.app.workspace.getLayout() as { floating?: LayoutNode };
+		return layout.floating?.children?.find((c) => c.id === idOf(ww));
 	}
 
 	/** After Obsidian starts (or the plugin loads), take back windows Obsidian restored and hide them. */
@@ -125,7 +132,7 @@ export class WindowManager {
 
 	private async open(cfg: WindowConfig): Promise<LiveWindow | null> {
 		const st = this.state(cfg);
-		return st.layout ? this.rebuild(cfg, st) : this.createFresh(cfg);
+		return st.layout ? this.rebuild(cfg, st, st.layout) : this.createFresh(cfg);
 	}
 
 	/** Opens a pop-out off-screen and hides it, so Obsidian's automatic show doesn't flash. */
@@ -149,8 +156,7 @@ export class WindowManager {
 		return this.attach(cfg, made.win, made.ww);
 	}
 
-	private async rebuild(cfg: WindowConfig, st: WindowState): Promise<LiveWindow | null> {
-		const root = st.layout;
+	private async rebuild(cfg: WindowConfig, st: WindowState, root: LayoutNode): Promise<LiveWindow | null> {
 		const t0 = performance.now();
 		const made = await this.openHidden(root.width ?? DEFAULT_SIZE.width, root.height ?? DEFAULT_SIZE.height);
 		if (!made) return null;
@@ -158,7 +164,7 @@ export class WindowManager {
 		try {
 			await this.buildNode(root, made.leaf, idMap);
 		} catch (e) {
-			this.plugin.log(`${cfg.name}: rebuild error: ${e}`);
+			this.plugin.log(`${cfg.name}: rebuild error: ${errorText(e)}`);
 		}
 		const active = st.activeLeafId ? idMap.get(st.activeLeafId) : undefined;
 		if (active) this.app.workspace.setActiveLeaf(active, { focus: false });
@@ -173,17 +179,17 @@ export class WindowManager {
 	}
 
 	/** Rebuilds one node of a saved layout into `leaf`, an empty slot. */
-	private async buildNode(node: any, leaf: WorkspaceLeaf, idMap: Map<string, WorkspaceLeaf>) {
+	private async buildNode(node: LayoutNode, leaf: WorkspaceLeaf, idMap: Map<string, WorkspaceLeaf>) {
 		const ws = this.app.workspace;
 		if (node.type === "leaf") {
-			await leaf.setViewState(node.state);
-			idMap.set(node.id, leaf);
+			if (node.state) await leaf.setViewState(node.state);
+			if (node.id) idMap.set(node.id, leaf);
 			return;
 		}
-		const kids: any[] = node.children ?? [];
+		const kids = node.children ?? [];
 		if (node.type === "tabs") {
 			const leaves = [leaf];
-			for (let i = 1; i < kids.length; i++) leaves.push(ws.createLeafInParent(leaf.parent as any, i));
+			for (let i = 1; i < kids.length; i++) leaves.push(ws.createLeafInParent(leaf.parent, i));
 			for (let i = 0; i < kids.length; i++) await this.buildNode(kids[i], leaves[i], idMap);
 			const current = leaves[node.currentTab ?? 0];
 			if (current) ws.setActiveLeaf(current, { focus: false });
@@ -218,7 +224,7 @@ export class WindowManager {
 			lw.frame.disable();
 		});
 		this.live.set(cfg.id, lw);
-		this.state(cfg).popoutId = (ww as any).id;
+		this.state(cfg).popoutId = idOf(ww);
 		this.plugin.requestSave();
 
 		// Tray's show-all (or Obsidian) may show a hidden window: hide it again and
@@ -304,7 +310,7 @@ export class WindowManager {
 
 	private watchUserMoves(lw: LiveWindow) {
 		const { win } = lw;
-		const listen = (event: string, fn: (...args: any[]) => void) => lw.cleanups.push(this.native.listen(win, event, fn));
+		const listen = (event: string, fn: Listener) => lw.cleanups.push(this.native.listen(win, event, fn));
 
 		// Fallback if the system resizes anyway: the edge flush against the screen can't be dragged.
 		listen("will-resize", (event: NativeEvent, _next: Rect, details: { edge: string }) => {
@@ -424,7 +430,7 @@ export class WindowManager {
 		try {
 			await fn();
 		} catch (e) {
-			this.plugin.log(`${id}: failed: ${e}`);
+			this.plugin.log(`${id}: failed: ${errorText(e)}`);
 		} finally {
 			if (lw) lw.animating--;
 			this.busy.delete(id);
@@ -467,12 +473,13 @@ export class WindowManager {
 	 * Wrapped for as long as the plugin is loaded.
 	 */
 	private hookTabClose() {
-		const proto = WorkspaceLeaf.prototype as any;
+		// `detach` exists on every leaf but isn't in Obsidian's public types.
+		const proto = WorkspaceLeaf.prototype as unknown as { detach: (this: WorkspaceLeaf, ...args: unknown[]) => unknown };
 		const original = proto.detach;
 		let active = true;
-		const manager = this;
+		const beforeTabClose = (leaf: WorkspaceLeaf) => this.beforeTabClose(leaf);
 		const wrapper = function (this: WorkspaceLeaf, ...args: unknown[]) {
-			if (active) manager.beforeTabClose(this);
+			if (active) beforeTabClose(this);
 			return original.apply(this, args);
 		};
 		proto.detach = wrapper;
@@ -530,10 +537,10 @@ export class WindowManager {
 		if (leaves.length === 0) return;
 		const st = this.state(lw.cfg);
 		const eStates: Record<string, unknown> = {};
-		for (const leaf of leaves) eStates[(leaf as any).id] = leaf.getEphemeralState();
+		for (const leaf of leaves) eStates[idOf(leaf)] = leaf.getEphemeralState();
 		const active = this.app.workspace.getMostRecentLeaf(lw.ww);
 		st.eStates = eStates;
-		st.activeLeafId = active ? (active as any).id : undefined;
+		st.activeLeafId = active ? idOf(active) : undefined;
 		this.plugin.requestSave();
 	}
 
@@ -576,8 +583,8 @@ export class WindowManager {
 				await this.hide(lw);
 			}
 		} catch (e) {
-			this.plugin.log(`${cfg.name}: toggle failed: ${e}`);
-			new Notice(`Hideaway: ${cfg.name}: ${e instanceof Error ? e.message : e}`);
+			this.plugin.log(`${cfg.name}: toggle failed: ${errorText(e)}`);
+			new Notice(`Hideaway: ${cfg.name}: ${errorText(e)}`);
 		} finally {
 			this.busy.delete(cfg.id);
 		}
@@ -651,7 +658,7 @@ export class WindowManager {
 	resetFocused() {
 		const lw = [...this.live.values()].find((l) => l.wantVisible && (l.win.isFocused() || l.ww.doc === activeDocument));
 		if (lw) void this.reset(lw.cfg);
-		else new Notice("Hideaway: no Hideaway window is in front.");
+		else new Notice("Hideaway: the window in front isn't one of its own.");
 	}
 
 	/** After a default (depth, span) changed in settings: a shown window on an edge using the defaults follows. */
@@ -854,7 +861,7 @@ export class WindowManager {
 				if (lw.win.isDestroyed()) continue;
 				this.native.release(lw.win, this.normalRect(lw.cfg), !this.quitting);
 			} catch (e) {
-				this.plugin.log(`${lw.cfg.name}: release failed: ${e}`);
+				this.plugin.log(`${lw.cfg.name}: release failed: ${errorText(e)}`);
 			}
 		}
 	}

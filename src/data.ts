@@ -1,3 +1,4 @@
+import type { SplitDirection, ViewState } from "obsidian";
 import type { Rect } from "./electron";
 
 export type Edge = "N" | "S" | "E" | "W";
@@ -48,12 +49,29 @@ export interface WindowConfig {
 	quake: QuakeConfig;
 }
 
+/** A node of Obsidian's saved layout (a private format): only the parts Hideaway reads. */
+export interface LayoutNode {
+	id?: string;
+	/** "leaf", "tabs", "split", or "window" (a pop-out's root). */
+	type?: string;
+	children?: LayoutNode[];
+	/** A leaf: what it shows. */
+	state?: ViewState;
+	/** Tabs: which one is shown. */
+	currentTab?: number;
+	/** A split or a window. */
+	direction?: SplitDirection;
+	/** A pop-out's root: its size. */
+	width?: number;
+	height?: number;
+}
+
 /** What Hideaway remembers about a named window between sessions. */
 export interface WindowState {
 	/** Obsidian's id for the pop-out, while it exists (open or hidden). */
 	popoutId?: string;
 	/** The window's part of Obsidian's layout: tabs and splits. */
-	layout?: any;
+	layout?: LayoutNode;
 	/** Leaf id -> ephemeral state (cursor, scroll). */
 	eStates?: Record<string, unknown>;
 	activeLeafId?: string;
@@ -82,17 +100,23 @@ export function defaultPlacement(q: QuakeConfig, edge: Edge): QuakePlacement {
 
 const EDGES: Edge[] = ["N", "S", "E", "W"];
 
+/** A window as version 1 or 2 saved it; version 1's hotkey modes were edges ("N", …) as well as "normal". */
+interface SavedWindow extends Partial<Omit<WindowConfig, "hotkeys" | "quake">> {
+	hotkeys?: { accelerator: string; mode: string }[];
+	quake?: Partial<QuakeConfig>;
+}
+
 /**
  * Turns saved data into the current shape, or returns null when it can't be
  * used (no version, e.g. the prototype's). Version 1 had one hotkey mode per
  * edge; those become Quake hotkeys, and the first one's edge the starting edge.
  */
 export function migrate(saved: unknown): HideawayData | null {
-	const data = saved as { version?: number; windows?: any[]; state?: Record<string, WindowState> } | null;
+	const data = saved as { version?: number; windows?: SavedWindow[]; state?: Record<string, WindowState> } | null;
 	if (!data || (data.version !== 1 && data.version !== 2) || !Array.isArray(data.windows)) return null;
 	const windows = data.windows.map((w): WindowConfig => {
-		const oldModes: string[] = (w.hotkeys ?? []).map((h: { mode: string }) => h.mode);
-		const hotkeys: HotkeyBinding[] = (w.hotkeys ?? []).map((h: { accelerator: string; mode: string }) => ({
+		const oldModes = (w.hotkeys ?? []).map((h) => h.mode);
+		const hotkeys: HotkeyBinding[] = (w.hotkeys ?? []).map((h) => ({
 			accelerator: h.accelerator,
 			mode: h.mode === "normal" ? "normal" : "quake",
 		}));
@@ -108,7 +132,7 @@ export function migrate(saved: unknown): HideawayData | null {
 				sideDepth: w.quake?.sideDepth ?? w.quake?.depth ?? DEFAULT_QUAKE.sideDepth,
 				sideSpan: w.quake?.sideSpan ?? w.quake?.span ?? DEFAULT_QUAKE.sideSpan,
 			},
-		};
+		} as WindowConfig;
 	});
 	return { version: 2, windows, state: data.state ?? {} };
 }

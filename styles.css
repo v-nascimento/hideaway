@@ -5,3 +5,11 @@
 	flex: none;
 	-webkit-app-region: no-drag;
 }
+
+/* A Quake window is moved and resized from the page (quakeDrag.ts), so its title bar and tab bar
+   aren't the system's drag area while it's on an edge. */
+.hideaway-quake-frame .titlebar,
+.hideaway-quake-frame .workspace-tab-header-container,
+.hideaway-quake-frame .workspace-tab-header-spacer {
+	-webkit-app-region: no-drag !important;
+}
